@@ -8,7 +8,7 @@ import pytest
 from unittest.mock import patch, Mock
 import subprocess
 import os
-from src.server_config import ServerConfig
+from src.config.server_config import ServerConfig
 
 
 class TestHardwareDetection:
