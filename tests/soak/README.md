@@ -1,6 +1,6 @@
-# MLX Server V2 - Soak Testing Suite
+# MLX Inference Server - Soak Testing Suite
 
-Comprehensive test suite for validating NASA-grade production features across the MLX Server fleet.
+Comprehensive test suite for validating Production-grade production features across the MLX Server fleet.
 
 ## Test Scripts
 
@@ -101,7 +101,7 @@ curl http://localhost:11437/admin/health
 
 ```
 ========================================================================
-MLX Server V2 - Comprehensive Soak Test
+MLX Inference Server - Comprehensive Soak Test
 Machine: Apple Silicon Mac (medium-memory)
 Test Model: mlx-community/Qwen2.5-7B-Instruct-4bit
 Started: Mon Dec 23 14:30:00 PST 2024
@@ -184,7 +184,7 @@ Tests Passed: 11
 Tests Failed: 0
 Completed: Mon Dec 23 14:35:00 PST 2024
 
-✓ ALL TESTS PASSED - NASA-GRADE VERIFIED
+✓ ALL TESTS PASSED - PRODUCTION VERIFIED
 ```
 
 ## Troubleshooting
@@ -253,6 +253,6 @@ vm_stat
 ```
 
 ## Author
-MLX Server V2 Development Team
+MLX Inference Server Development Team
 Tested on: Apple Silicon Mac (medium-memory), Apple Silicon Mac (high-memory)
 Last Updated: 2024-12-23

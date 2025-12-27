@@ -1,5 +1,5 @@
 """
-Unit tests for NASA-grade hardware detection in ServerConfig.
+Unit tests for Production-grade hardware detection in ServerConfig.
 
 Tests all detection paths, profiles, fallbacks, and edge cases.
 """

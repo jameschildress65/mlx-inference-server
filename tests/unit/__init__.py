@@ -1,3 +1,3 @@
 """
-Unit tests for MLX Server V2 components
+Unit tests for MLX Inference Server components
 """

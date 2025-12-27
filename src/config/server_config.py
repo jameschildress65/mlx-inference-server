@@ -288,7 +288,7 @@ class ServerConfig:
     def __str__(self) -> str:
         """Human-readable configuration display."""
         return f"""
-MLX Server V2 Configuration (NASA-Grade Detection)
+MLX Inference Server Configuration (NASA-Grade Detection)
 ===================================================
 Hardware Detected:
   Model Name:       {self.model_name}

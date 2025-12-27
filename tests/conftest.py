@@ -171,7 +171,7 @@ def mock_t9_drive(mocker, tmp_path):
     t9_path.mkdir()
 
     def mock_exists(path):
-        return str(path) == "/Volumes/T9" or str(path) == str(t9_path)
+        return str(path) == "~/.cache/huggingface" or str(path) == str(t9_path)
 
     mocker.patch('os.path.exists', side_effect=mock_exists)
     return t9_path
