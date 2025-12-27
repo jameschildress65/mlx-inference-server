@@ -1,5 +1,5 @@
 #!/bin/bash
-# MLX Server V2 - Stop Background Daemon with Graceful Shutdown
+# MLX Inference Server - Stop Background Daemon with Graceful Shutdown
 
 set -e
 
@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 
 if [ -f .mlx_server.pid ]; then
     PID=$(cat .mlx_server.pid)
-    echo "Stopping MLX Server V2 (PID: $PID)..."
+    echo "Stopping MLX Inference Server (PID: $PID)..."
 
     # Send SIGTERM for graceful shutdown
     if ! kill $PID 2>/dev/null; then

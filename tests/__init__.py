@@ -1,3 +1,3 @@
 """
-MLX Server V2 - Test Suite
+MLX Inference Server - Test Suite
 """

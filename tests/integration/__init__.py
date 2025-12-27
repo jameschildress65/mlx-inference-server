@@ -1,5 +1,5 @@
 """
-Integration tests for MLX Server V2
+Integration tests for MLX Inference Server
 
 Tests actual HTTP endpoints with a running server instance.
 """

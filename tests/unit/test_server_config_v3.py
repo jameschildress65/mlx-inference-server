@@ -80,7 +80,7 @@ class TestServerConfigMachineDetection:
         mock_ram.return_value = 128
         mock_chip.return_value = "Apple M-series"
         mock_model.return_value = "Apple Silicon Mac"
-        mock_exists.return_value = True  # /Volumes/T9 exists
+        mock_exists.return_value = True  # ~/.cache/huggingface exists
 
         config = ServerConfig.auto_detect()
 
@@ -99,7 +99,7 @@ class TestServerConfigMachineDetection:
         mock_ram.return_value = 32
         mock_chip.return_value = "Apple M4"
         mock_model.return_value = "Apple Silicon Mac"
-        mock_exists.return_value = False  # No /Volumes/T9
+        mock_exists.return_value = False  # No ~/.cache/huggingface
 
         config = ServerConfig.auto_detect()
 

@@ -118,7 +118,7 @@ class TestServerConfig:
         config = ServerConfig.auto_detect()
         config_str = str(config)
 
-        assert 'MLX Server V2 Configuration' in config_str
+        assert 'MLX Inference Server Configuration' in config_str
         assert 'Machine Type' in config_str
         assert 'AIR' in config_str
         assert '180s' in config_str  # 3 min for Air

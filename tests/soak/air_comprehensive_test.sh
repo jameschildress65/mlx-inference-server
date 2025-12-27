@@ -1,6 +1,6 @@
 #!/bin/bash
-# MLX Server V2 - Comprehensive Soak Test for Apple Silicon Mac M4
-# Tests all NASA-grade features: loading, queries, unload, timeout, memory recovery
+# MLX Inference Server - Comprehensive Soak Test for Apple Silicon Mac M4
+# Tests all Production-grade features: loading, queries, unload, timeout, memory recovery
 
 set -e
 
@@ -50,7 +50,7 @@ get_active_requests() {
 }
 
 echo "========================================================================"
-echo "MLX Server V2 - Comprehensive Soak Test"
+echo "MLX Inference Server - Comprehensive Soak Test"
 echo "Machine: Apple Silicon Mac (medium-memory)"
 echo "Test Model: $MODEL"
 echo "Started: $(date)"
@@ -283,7 +283,7 @@ echo "Completed: $(date)"
 echo ""
 
 if [ $TESTS_FAILED -eq 0 ]; then
-    echo -e "${GREEN}✓ ALL TESTS PASSED - NASA-GRADE VERIFIED${NC}"
+    echo -e "${GREEN}✓ ALL TESTS PASSED - PRODUCTION VERIFIED${NC}"
     exit 0
 else
     echo -e "${RED}✗ SOME TESTS FAILED - REVIEW REQUIRED${NC}"

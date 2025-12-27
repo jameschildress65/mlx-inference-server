@@ -1,5 +1,5 @@
 #!/bin/bash
-# MLX Server V2 - Background Daemon Starter
+# MLX Inference Server - Background Daemon Starter
 # This script runs the server in the background without keeping a terminal open
 
 set -e
@@ -49,7 +49,7 @@ nohup ~/.pyenv/versions/mlx-server/bin/python3 mlx_server_extended.py \
 for i in {1..10}; do
     if [ -f .mlx_server.pid ]; then
         PYTHON_PID=$(cat .mlx_server.pid)
-        echo "✓ MLX Server V2 started in background (PID: $PYTHON_PID)"
+        echo "✓ MLX Inference Server started in background (PID: $PYTHON_PID)"
         echo "  Logs: logs/daemon.log"
         echo "  Stop: ./bin/mlx-server-stop.sh"
         exit 0
@@ -58,6 +58,6 @@ for i in {1..10}; do
 done
 
 # If we get here, PID file was not created - startup failed
-echo "✗ Failed to start MLX Server V2 (no PID file created)"
+echo "✗ Failed to start MLX Inference Server (no PID file created)"
 echo "  Check logs/daemon.log for errors"
 exit 1
