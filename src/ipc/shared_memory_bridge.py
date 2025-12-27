@@ -127,6 +127,7 @@ class SharedMemoryBridge:
         """
         self.name = name  # Legacy, unused
         self.is_server = is_server
+        self._closed = False  # Track cleanup state to prevent double-cleanup
 
         # Calculate total size needed
         total_size = 2 * (self.HEADER_SIZE + self.RING_SIZE)
@@ -457,6 +458,11 @@ class SharedMemoryBridge:
 
     def close(self):
         """Clean up resources including POSIX semaphores."""
+        # Prevent double-cleanup (fixes worker crash bug)
+        if self._closed:
+            return
+        self._closed = True
+
         # PHASE 2: Release memoryview references before closing shared memory
         # This prevents "cannot close exported pointers exist" errors
         if hasattr(self, 'req_header'):
