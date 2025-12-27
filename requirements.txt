@@ -1,0 +1,14 @@
+# MLX and model serving
+mlx-lm>=0.28.4
+setproctitle>=1.3.3
+
+# V3 API dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+httpx>=0.24.0
+psutil>=5.9.0
