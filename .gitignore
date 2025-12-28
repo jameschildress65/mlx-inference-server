@@ -67,3 +67,7 @@ htmlcov/
 *.bak
 *.orig
 tmp/
+
+# Private/Internal (not for public repo)
+private/
+opus-submissions/
