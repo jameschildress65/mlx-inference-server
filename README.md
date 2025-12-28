@@ -25,12 +25,16 @@ Built to address limitations in existing MLX servers: lack of process isolation,
 
 ## Quick Start
 
+**⚡ New to this? See [QUICKSTART.md](QUICKSTART.md) for 10-minute setup guide**
+
+**📖 Detailed instructions: [Installation Guide](docs/INSTALLATION-GUIDE.md)**
+
 ### Installation
 
 **Requirements:**
 - Apple Silicon Mac (M1/M2/M3/M4)
-- Python 3.8+
-- 16GB+ RAM (64GB+ recommended for large models)
+- Python 3.12+ (via pyenv recommended)
+- 16GB+ RAM (32GB+ recommended for 7B+ models)
 
 ```bash
 # Clone repository
