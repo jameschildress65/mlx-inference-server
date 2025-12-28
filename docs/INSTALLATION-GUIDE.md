@@ -21,6 +21,12 @@
 
 ## Prerequisites
 
+**⚠️ IMPORTANT: Complete ALL prerequisites (Steps 1-4) BEFORE moving to Installation Steps.**
+
+Skipping prerequisites (especially Step 4: Python setup) will cause conflicts and errors later.
+
+---
+
 ### 1. Check macOS Version
 
 ```bash
@@ -106,6 +112,28 @@ pyenv global 3.12.7
 python --version  # Should show Python 3.12.7
 which python      # Should show ~/.pyenv/versions/3.12.7/bin/python
 ```
+
+---
+
+## ✅ Prerequisites Checkpoint
+
+**Before continuing, verify all prerequisites are complete:**
+
+```bash
+# Should show Python 3.12.7
+python --version
+
+# Should show ~/.pyenv/versions/3.12.7/bin/python
+which python
+
+# Should show git version
+git --version
+
+# Should show brew version
+brew --version
+```
+
+**If any of these fail, go back to Prerequisites section above.**
 
 ---
 
