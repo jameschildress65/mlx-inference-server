@@ -387,7 +387,8 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                     "usage": {
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
-                        "total_tokens": total_tokens
+                        "total_tokens": total_tokens,
+                        "tokens_per_sec": round(tokens_per_sec, 2)
                     }
                 }
 
