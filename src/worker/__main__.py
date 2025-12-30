@@ -251,6 +251,46 @@ class WorkerProcess:
             sys.exit(1)
 
 
+def validate_model_path(model_path: str) -> None:
+    """
+    Validate model path on worker side (defense in depth).
+
+    Security: Opus 4.5 Critical Fix C2
+    - Ensures model path follows org/model format
+    - Blocks path traversal attempts
+    - Validates safe characters only
+
+    Args:
+        model_path: Model path to validate
+
+    Raises:
+        ValueError: If model path is invalid or unsafe
+    """
+    import re
+
+    # Must match HuggingFace org/model format
+    SAFE_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$')
+
+    if not SAFE_PATTERN.match(model_path):
+        raise ValueError(
+            f"Invalid model path format: {model_path}. "
+            f"Expected: org/model (e.g., mlx-community/Qwen2.5-7B-Instruct-4bit)"
+        )
+
+    # Explicit path traversal check
+    if '..' in model_path or model_path.startswith('/'):
+        raise ValueError(f"Path traversal detected: {model_path}")
+
+    # Must be exactly one '/' (org/model format)
+    if model_path.count('/') != 1:
+        raise ValueError(
+            f"Model path must be org/model format: {model_path} "
+            f"(has {model_path.count('/')} slashes, expected 1)"
+        )
+
+    logger.debug(f"Model path validated: {model_path}")
+
+
 def main():
     """Worker entry point."""
     if len(sys.argv) < 2:
@@ -259,6 +299,14 @@ def main():
 
     model_path = sys.argv[1]
     worker_id = int(sys.argv[2]) if len(sys.argv) >= 3 else 1
+
+    # Security: Validate model path (Opus 4.5 Critical Fix C2 - defense in depth)
+    try:
+        validate_model_path(model_path)
+    except ValueError as e:
+        logger.error(f"Invalid model path: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # PHASE 2 Security: Read shared memory name from environment variable
     # (not CLI args, for security - prevents exposure in process listings)

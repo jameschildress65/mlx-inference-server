@@ -20,6 +20,7 @@ import time
 import logging
 import subprocess
 import hashlib
+import uuid
 from multiprocessing import shared_memory
 from multiprocessing import resource_tracker
 from typing import Optional, Union
@@ -150,10 +151,12 @@ class SharedMemoryBridge:
         # Create POSIX semaphores for cross-process synchronization (Production-grade)
         # Each ring buffer needs its own semaphore for mutual exclusion
         # IMPORTANT: Semaphore names have 31-char limit on macOS (including leading /)
-        # Use short hash to stay well under limit
-        name_hash = hashlib.sha256(self.shm_name.encode()).hexdigest()[:8]
-        self.req_sem_name = f"/mlxr{name_hash}"  # /mlxr + 8 hex = 13 chars (safe!)
-        self.resp_sem_name = f"/mlxs{name_hash}"  # /mlxs + 8 hex = 13 chars (safe!)
+        # Opus 4.5 High Priority Fix H2: Use 16-char UUID for uniqueness (was 8-char)
+        # 8 hex chars = 32 bits = collision at ~65K workers (birthday paradox)
+        # 16 hex chars = 64 bits = effectively unique (no realistic collision)
+        unique_id = uuid.uuid4().hex[:16]  # 16 hex chars from UUID
+        self.req_sem_name = f"/r{unique_id}"  # /r + 16 hex = 18 chars (safe under 31 limit)
+        self.resp_sem_name = f"/s{unique_id}"  # /s + 16 hex = 18 chars (safe under 31 limit)
         sem_flags = posix_ipc.O_CREAT if is_server else 0
 
         try:
@@ -184,6 +187,13 @@ class SharedMemoryBridge:
     def _setup_rings(self):
         """Map ring buffer regions into separate views."""
         buf = self.shm.buf
+
+        # Opus 4.5 High Priority Fix H5: Zero shared memory on creation
+        # Prevents data leakage from previous runs (if memory wasn't fully released to OS)
+        # Only server zeros on creation, worker attaches to existing memory
+        if self.is_server:
+            buf[:] = b'\x00' * len(buf)
+            logger.debug(f"Zeroed shared memory buffer: {len(buf)} bytes")
 
         # Request ring: orchestrator writes, worker reads
         req_offset = 0
