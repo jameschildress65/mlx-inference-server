@@ -2,6 +2,7 @@
 
 import logging
 import json
+from functools import lru_cache
 from typing import Dict, Any, Optional, Union, Literal
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -17,11 +18,15 @@ from .image_utils import prepare_images, ImageProcessingError
 logger = logging.getLogger(__name__)
 
 # Phase 1.1: Tokenizer cache - avoid reloading tokenizer on every request
-_tokenizer_cache: Dict[str, Any] = {}
-
-
+# Opus 4.5 High Priority Fix H1: Bounded cache (was unbounded dict)
+@lru_cache(maxsize=5)
 def get_tokenizer(model_path: str):
     """Get cached tokenizer or load if not cached.
+
+    Security: Opus 4.5 High Priority Fix H1
+    - Bounded cache prevents memory leak from many different models
+    - LRU eviction: keeps last 5 tokenizers, evicts least recently used
+    - Each tokenizer ~50-200MB, so 5 = ~250MB-1GB max
 
     Args:
         model_path: HuggingFace model path (e.g. 'mlx-community/Qwen2.5-32B-Instruct-4bit')
@@ -29,13 +34,19 @@ def get_tokenizer(model_path: str):
     Returns:
         AutoTokenizer instance
     """
-    if model_path not in _tokenizer_cache:
-        from transformers import AutoTokenizer
-        logger.info(f"Loading tokenizer for {model_path} (first time)")
-        _tokenizer_cache[model_path] = AutoTokenizer.from_pretrained(model_path)
-    else:
-        logger.debug(f"Using cached tokenizer for {model_path}")
-    return _tokenizer_cache[model_path]
+    from transformers import AutoTokenizer
+    logger.info(f"Loading tokenizer for {model_path}")
+    return AutoTokenizer.from_pretrained(model_path)
+
+
+def clear_tokenizer_cache():
+    """Clear tokenizer cache (call on model unload).
+
+    Security: Opus 4.5 High Priority Fix H1
+    Allows explicit cache cleanup when models are unloaded.
+    """
+    get_tokenizer.cache_clear()
+    logger.info("Tokenizer cache cleared")
 
 
 # Request/Response Models (OpenAI-compatible)

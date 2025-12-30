@@ -81,3 +81,4 @@ docs/DEPLOYMENT-*.md       # Internal deployment notes
 docs/PERFORMANCE-*.md      # Internal performance notes
 docs/VLM-MODEL-RECOMMENDATIONS.md  # Internal model testing
 docs/benchmarks/           # Internal benchmark results
+docs/opus-reviews/           # Opus code reviews (internal)
