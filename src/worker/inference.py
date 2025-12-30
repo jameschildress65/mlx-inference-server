@@ -253,9 +253,28 @@ class VisionInferenceBackend(InferenceBackend):
         Args:
             model: Loaded MLX vision model
             processor: Loaded vision processor
+
+        Raises:
+            ValueError: If model or processor validation fails
         """
         self.model = model
         self.processor = processor
+
+        # M7: Health check for vision backend
+        # Validate model has expected attributes
+        if not hasattr(model, 'config'):
+            logger.warning("Vision model missing 'config' attribute")
+
+        # Verify processor is usable
+        try:
+            # Check for tokenizer (most vision processors have this)
+            if hasattr(processor, 'tokenizer'):
+                _ = processor.tokenizer
+            # Verify processor callable
+            if not callable(getattr(processor, '__call__', None)):
+                raise ValueError("Vision processor is not callable")
+        except Exception as e:
+            raise ValueError(f"Invalid vision processor: {e}")
 
     def _decode_images(self, image_data_list: List) -> List:
         """
