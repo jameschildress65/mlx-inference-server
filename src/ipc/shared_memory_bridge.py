@@ -20,7 +20,6 @@ import time
 import logging
 import subprocess
 import hashlib
-import uuid
 from multiprocessing import shared_memory
 from multiprocessing import resource_tracker
 from typing import Optional, Union
@@ -151,12 +150,13 @@ class SharedMemoryBridge:
         # Create POSIX semaphores for cross-process synchronization (Production-grade)
         # Each ring buffer needs its own semaphore for mutual exclusion
         # IMPORTANT: Semaphore names have 31-char limit on macOS (including leading /)
-        # Opus 4.5 High Priority Fix H2: Use 16-char UUID for uniqueness (was 8-char)
+        # Opus 4.5 High Priority Fix H2: Use 16-char hash for uniqueness (was 8-char)
+        # Must be DETERMINISTIC so orchestrator and worker derive same names
         # 8 hex chars = 32 bits = collision at ~65K workers (birthday paradox)
         # 16 hex chars = 64 bits = effectively unique (no realistic collision)
-        unique_id = uuid.uuid4().hex[:16]  # 16 hex chars from UUID
-        self.req_sem_name = f"/r{unique_id}"  # /r + 16 hex = 18 chars (safe under 31 limit)
-        self.resp_sem_name = f"/s{unique_id}"  # /s + 16 hex = 18 chars (safe under 31 limit)
+        name_hash = hashlib.sha256(self.shm_name.encode()).hexdigest()[:16]  # Deterministic from shm_name
+        self.req_sem_name = f"/r{name_hash}"  # /r + 16 hex = 18 chars (safe under 31 limit)
+        self.resp_sem_name = f"/s{name_hash}"  # /s + 16 hex = 18 chars (safe under 31 limit)
         sem_flags = posix_ipc.O_CREAT if is_server else 0
 
         try:
