@@ -158,6 +158,113 @@ Content-Type: application/json
 
 ---
 
+### Vision/Multimodal Chat Completion
+
+```http
+POST /v1/chat/completions
+Content-Type: application/json
+```
+
+**Vision models supported**: `mlx-community/Qwen2.5-VL-7B-Instruct-4bit`, `mlx-community/Qwen2-VL-*`, `mlx-community/llava-*`
+
+**Single Image Request**:
+```json
+{
+  "model": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "What's in this image?"},
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAA..."
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 200,
+  "temperature": 0.7
+}
+```
+
+**Multiple Images Request**:
+```json
+{
+  "model": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Compare these two images:"},
+        {
+          "type": "image_url",
+          "image_url": {"url": "data:image/png;base64,iVBORw0KG..."}
+        },
+        {
+          "type": "image_url",
+          "image_url": {"url": "data:image/jpeg;base64,/9j/4AAQ..."}
+        }
+      ]
+    }
+  ],
+  "max_tokens": 300
+}
+```
+
+**HTTP URL Image Request**:
+```json
+{
+  "model": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe this diagram:"},
+        {
+          "type": "image_url",
+          "image_url": {"url": "https://example.com/diagram.png"}
+        }
+      ]
+    }
+  ],
+  "max_tokens": 250
+}
+```
+
+**Response**: Same format as regular chat completion
+
+**Security Limits**:
+- Max images per request: 5
+- Max image size: 10MB (decoded)
+- Max image pixels: 50 megapixels (PIL decompression bomb protection)
+- Supported formats: JPEG, PNG, WebP, BMP, GIF
+
+**Image URL Formats**:
+- `data:image/jpeg;base64,<base64-data>` - Inline base64 (preferred for small images)
+- `data:image/png;base64,<base64-data>` - PNG base64
+- `https://...` - HTTP/HTTPS URLs (10s timeout)
+- `http://...` - Auto-upgraded to HTTPS
+
+**Automatic Backend Selection**:
+- Vision models: Automatically use `venv-vision` with `mlx-vlm`
+- Text models: Use main `venv` with `mlx-lm`
+- No manual configuration required
+
+**Error Responses**:
+
+| Status | Error | Cause |
+|--------|-------|-------|
+| 400 | "Too many images: X exceeds limit of 5" | Too many images |
+| 400 | "Image too large: X MB exceeds 10MB limit" | Oversized image |
+| 400 | "Invalid image data" | Corrupted image file |
+| 400 | "Unsupported image format" | Unknown format |
+| 503 | "Vision environment not found" | venv-vision not installed |
+
+---
+
 ### List Models
 
 ```http
@@ -410,6 +517,84 @@ for line in response.iter_lines():
             print(text, end='', flush=True)
 ```
 
+### Vision/Multimodal (Python)
+
+```python
+import requests
+import base64
+
+# Load and encode image
+with open("diagram.png", "rb") as f:
+    image_base64 = base64.b64encode(f.read()).decode('utf-8')
+
+# Load vision model
+requests.post(
+    "http://localhost:11441/admin/load",
+    params={"model_path": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit"}
+)
+
+# Single image vision request
+response = requests.post(
+    "http://localhost:11440/v1/chat/completions",
+    json={
+        "model": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image in detail:"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image_base64}"
+                        }
+                    }
+                ]
+            }
+        ],
+        "max_tokens": 300,
+        "temperature": 0.7
+    }
+)
+
+print(response.json()["choices"][0]["message"]["content"])
+```
+
+### Vision with Multiple Images (Python)
+
+```python
+import requests
+import base64
+
+# Encode multiple images
+images = []
+for img_path in ["photo1.jpg", "photo2.jpg"]:
+    with open(img_path, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode('utf-8')
+        images.append(f"data:image/jpeg;base64,{img_b64}")
+
+# Compare images
+response = requests.post(
+    "http://localhost:11440/v1/chat/completions",
+    json={
+        "model": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Compare these two images. What are the differences?"},
+                    {"type": "image_url", "image_url": {"url": images[0]}},
+                    {"type": "image_url", "image_url": {"url": images[1]}}
+                ]
+            }
+        ],
+        "max_tokens": 400
+    }
+)
+
+print(response.json()["choices"][0]["message"]["content"])
+```
+
 ### curl
 
 ```bash
@@ -441,6 +626,47 @@ curl -X POST http://localhost:11440/v1/completions \
 
 # Unload
 curl -X POST http://localhost:11441/admin/unload
+
+# Vision: Load vision model
+curl -X POST "http://localhost:11441/admin/load?model_path=mlx-community/Qwen2.5-VL-7B-Instruct-4bit"
+
+# Vision: Single image (base64)
+curl -X POST http://localhost:11440/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "What is in this image?"},
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
+          }
+        }
+      ]
+    }],
+    "max_tokens": 200
+  }'
+
+# Vision: HTTP URL image
+curl -X POST http://localhost:11440/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe this diagram:"},
+        {
+          "type": "image_url",
+          "image_url": {"url": "https://example.com/diagram.png"}
+        }
+      ]
+    }],
+    "max_tokens": 250
+  }'
 ```
 
 ---
@@ -458,7 +684,7 @@ client = OpenAI(
     base_url="http://localhost:11440/v1"
 )
 
-# Use OpenAI API
+# Text completion
 response = client.completions.create(
     model="mlx-community/Qwen2.5-7B-Instruct-4bit",
     prompt="What is MLX?",
@@ -466,12 +692,41 @@ response = client.completions.create(
 )
 
 print(response.choices[0].text)
+
+# Vision completion
+import base64
+with open("diagram.png", "rb") as f:
+    img_b64 = base64.b64encode(f.read()).decode('utf-8')
+
+response = client.chat.completions.create(
+    model="mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What's in this image?"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{img_b64}"
+                    }
+                }
+            ]
+        }
+    ],
+    max_tokens=200
+)
+
+print(response.choices[0].message.content)
 ```
 
 **Supported**:
 - ✅ `client.completions.create()`
 - ✅ `client.chat.completions.create()`
+- ✅ Vision/multimodal messages
 - ✅ Streaming
+- ✅ Multiple images per message
+- ✅ Base64 and HTTP URL images
 
 **Not Supported**:
 - ❌ `client.models.list()` (returns only loaded model)
@@ -504,6 +759,7 @@ print(response.choices[0].text)
 
 ---
 
-**Document Version**: 1.0
-**Last Updated**: 2025-12-24
+**Document Version**: 1.1
+**Last Updated**: 2025-12-30
+**Changes**: Added vision/multimodal API support
 **Maintainer**: MLX Server V3 Team
