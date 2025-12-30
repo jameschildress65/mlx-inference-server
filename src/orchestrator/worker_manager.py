@@ -545,6 +545,13 @@ class WorkerManager:
                 "tokens": response.tokens,
                 "finish_reason": response.finish_reason
             }
+        except BrokenPipeError as e:
+            # Opus 4.5 High Priority Fix H4: Handle race condition where worker dies
+            # between health check and message send (TOCTOU race)
+            self.logger.error(f"Worker died during generation: {e}")
+            with self.lock:
+                self._cleanup_dead_worker()
+            raise WorkerError("Worker process died during generation. Reload model required.")
         finally:
             # Always decrement active requests (even on error)
             self._decrement_active_requests()
@@ -595,6 +602,13 @@ class WorkerManager:
                         break
                 else:
                     raise WorkerError(f"Expected 'stream_chunk', got '{chunk.type}'")
+        except BrokenPipeError as e:
+            # Opus 4.5 High Priority Fix H4: Handle race condition where worker dies
+            # between health check and message send (TOCTOU race)
+            self.logger.error(f"Worker died during streaming generation: {e}")
+            with self.lock:
+                self._cleanup_dead_worker()
+            raise WorkerError("Worker process died during streaming. Reload model required.")
         finally:
             # Always decrement active requests (even on error)
             self._decrement_active_requests()

@@ -6,13 +6,17 @@ Handles:
 - Local file path loading
 - Image validation with PIL
 - Size limit enforcement
+- SSRF protection (blocking private IPs)
 """
 
 import base64
 import re
 import logging
+import socket
+import ipaddress
 from typing import Optional, Tuple
 from pathlib import Path
+from urllib.parse import urlparse
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -22,6 +26,18 @@ MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB per image
 MAX_TOTAL_IMAGES = 5  # Max images per request
 URL_TIMEOUT_SECONDS = 10.0  # HTTP download timeout
 INLINE_THRESHOLD = 500 * 1024  # 500KB threshold for inline vs shmem
+
+# SSRF Protection: Blocked IP ranges (Opus 4.5 recommendation)
+BLOCKED_IP_RANGES = [
+    ipaddress.ip_network('10.0.0.0/8'),          # Private: Class A
+    ipaddress.ip_network('172.16.0.0/12'),       # Private: Class B
+    ipaddress.ip_network('192.168.0.0/16'),      # Private: Class C
+    ipaddress.ip_network('127.0.0.0/8'),         # Localhost
+    ipaddress.ip_network('169.254.0.0/16'),      # Link-local / Cloud metadata (AWS/GCP/Azure)
+    ipaddress.ip_network('::1/128'),             # IPv6 localhost
+    ipaddress.ip_network('fc00::/7'),            # IPv6 private
+    ipaddress.ip_network('fe80::/10'),           # IPv6 link-local
+]
 
 
 class ImageProcessingError(Exception):
@@ -83,6 +99,59 @@ def decode_data_url(data_url: str) -> Tuple[bytes, str]:
     return (image_bytes, format_str)
 
 
+def is_safe_url(url: str) -> Tuple[bool, Optional[str]]:
+    """
+    Validate URL doesn't point to internal/private resources (SSRF protection).
+
+    Args:
+        url: URL to validate
+
+    Returns:
+        Tuple of (is_safe, error_message)
+
+    Security: Opus 4.5 Critical Fix C1
+    - Blocks private IP ranges (10.x, 172.16.x, 192.168.x)
+    - Blocks localhost (127.x)
+    - Blocks link-local / cloud metadata (169.254.x)
+    - Blocks IPv6 private ranges
+    """
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+
+        if not hostname:
+            return (False, "URL missing hostname")
+
+        # Resolve hostname to IP addresses (both IPv4 and IPv6)
+        try:
+            results = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC)
+        except socket.gaierror as e:
+            return (False, f"Cannot resolve hostname: {e}")
+
+        # Check each resolved IP against blocked ranges
+        for family, _, _, _, sockaddr in results:
+            ip_str = sockaddr[0]
+            try:
+                ip = ipaddress.ip_address(ip_str)
+
+                # Check against blocked ranges
+                for blocked_range in BLOCKED_IP_RANGES:
+                    if ip in blocked_range:
+                        return (
+                            False,
+                            f"URL resolves to blocked IP range: {ip} in {blocked_range} "
+                            f"(SSRF protection - private/internal network access blocked)"
+                        )
+            except ValueError:
+                # Invalid IP address format
+                continue
+
+        return (True, None)
+
+    except Exception as e:
+        return (False, f"URL validation error: {e}")
+
+
 async def fetch_image(url: str) -> Tuple[bytes, str]:
     """
     Download image from HTTP/HTTPS URL.
@@ -102,8 +171,10 @@ async def fetch_image(url: str) -> Tuple[bytes, str]:
     if not url.startswith(('http://', 'https://')):
         raise InvalidImageError(f"Invalid URL scheme: {url}. Only http:// and https:// supported")
 
-    # TODO Phase 2: Security - optionally block private IPs
-    # For now, allow all public URLs (per user selection)
+    # SSRF Protection: Block private IP ranges (Opus 4.5 Critical Fix C1)
+    is_safe, error_msg = is_safe_url(url)
+    if not is_safe:
+        raise InvalidImageError(f"URL blocked by SSRF protection: {error_msg}")
 
     try:
         # Use asyncio subprocess to run curl with timeout

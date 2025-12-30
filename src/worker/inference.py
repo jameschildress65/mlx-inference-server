@@ -4,8 +4,20 @@ Phase 3: Supports both text-only and vision models via backend routing.
 """
 
 import logging
+import base64
+import io
 from typing import Any, Dict, Iterator, Optional, List
 from abc import ABC, abstractmethod
+
+# Opus 4.5 High Priority Fix H3: Set PIL bomb protection at module load (not in method)
+try:
+    from PIL import Image
+    # Set decompression bomb protection BEFORE any image operations
+    # 50 megapixels = ~7071x7071 image = reasonable limit for vision models
+    Image.MAX_IMAGE_PIXELS = 50_000_000
+except ImportError:
+    # PIL not available (text-only worker)
+    Image = None
 
 logger = logging.getLogger(__name__)
 
@@ -250,8 +262,8 @@ class VisionInferenceBackend(InferenceBackend):
         Decode ImageData objects to PIL images with security protections.
 
         Security Features:
-        - PIL decompression bomb protection (MAX_IMAGE_PIXELS)
-        - Base64 bomb protection (size limits)
+        - PIL decompression bomb protection (set at module load - Opus H3)
+        - Base64 bomb protection (size limits before decode)
         - Image count limits
 
         Args:
@@ -263,14 +275,9 @@ class VisionInferenceBackend(InferenceBackend):
         Raises:
             ValueError: If security limits exceeded or invalid image
         """
-        from PIL import Image
-        import base64
-        import io
-
         # Security limits (Opus recommendations)
         MAX_IMAGES = 5
         MAX_BASE64_SIZE = 10 * 1024 * 1024  # 10MB
-        MAX_IMAGE_PIXELS = 50_000_000  # 50 megapixels (PIL bomb protection)
 
         # Check image count limit
         if len(image_data_list) > MAX_IMAGES:
@@ -278,8 +285,7 @@ class VisionInferenceBackend(InferenceBackend):
                 f"Too many images: {len(image_data_list)} exceeds limit of {MAX_IMAGES}"
             )
 
-        # Set PIL decompression bomb protection
-        Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+        # PIL.Image.MAX_IMAGE_PIXELS already set at module load (Opus H3)
 
         images = []
         for idx, img_data in enumerate(image_data_list):
