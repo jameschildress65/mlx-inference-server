@@ -12,6 +12,7 @@ Built to address limitations in existing MLX servers: lack of process isolation,
 
 ### Core Capabilities
 - **Process Isolation**: Worker processes separated from orchestrator for crash resilience
+- **Vision/Multimodal**: Support for vision-language models with dual-venv architecture
 - **POSIX Semaphores**: Cross-process synchronization with proper memory ordering
 - **Atomic Operations**: Crash-safe file operations using temp-file + rename pattern
 - **Async-Signal-Safe**: Proper signal handling without deadlock risks
@@ -28,6 +29,8 @@ Built to address limitations in existing MLX servers: lack of process isolation,
 **⚡ New to this? See [QUICKSTART.md](QUICKSTART.md) for 10-minute setup guide**
 
 **📖 Detailed instructions: [Installation Guide](docs/INSTALLATION-GUIDE.md)**
+
+**🖼️ Vision/Multimodal support: [Vision Setup Guide](docs/VISION-SETUP.md)**
 
 ### Installation
 
