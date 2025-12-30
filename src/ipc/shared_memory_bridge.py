@@ -95,6 +95,7 @@ class SharedMemoryBridge:
     - Lock-free writes with atomic position updates
     - Blocking reads with timeout using select() on signal pipes
     - Zero-copy on Apple Silicon unified memory (CPU/GPU share same physical pages)
+    - Vision support: 16MB image buffer for large images (≥500KB)
 
     Performance characteristics:
     - Latency: <1µs (vs 50-100µs for stdin/stdout)
@@ -103,6 +104,7 @@ class SharedMemoryBridge:
     """
 
     RING_SIZE = 4 * 1024 * 1024  # 4MB per direction
+    IMAGE_BUFFER_SIZE = 16 * 1024 * 1024  # 16MB for vision/multimodal (large images ≥500KB)
     CACHE_LINE_SIZE = _detect_cache_line_size()  # 128 on Apple Silicon, 64 on x86_64
     HEADER_SIZE = 2 * CACHE_LINE_SIZE  # Separate cache lines for writer/reader (no false sharing)
 
@@ -130,7 +132,8 @@ class SharedMemoryBridge:
         self._closed = False  # Track cleanup state to prevent double-cleanup
 
         # Calculate total size needed
-        total_size = 2 * (self.HEADER_SIZE + self.RING_SIZE)
+        # Layout: [request_ring][response_ring][image_buffer]
+        total_size = 2 * (self.HEADER_SIZE + self.RING_SIZE) + self.IMAGE_BUFFER_SIZE
 
         # Create or attach to shared memory using SecureSharedMemoryManager
         self._shm_manager = SecureSharedMemoryManager(
@@ -194,6 +197,12 @@ class SharedMemoryBridge:
         self.resp_data = buf[resp_offset + self.HEADER_SIZE:
                             resp_offset + self.HEADER_SIZE + self.RING_SIZE]
 
+        # Image buffer: for large images (≥500KB) in vision/multimodal requests
+        # Shared by both directions (orchestrator can write images for worker to read)
+        image_offset = 2 * (self.HEADER_SIZE + self.RING_SIZE)
+        self.image_buffer = buf[image_offset:image_offset + self.IMAGE_BUFFER_SIZE]
+        self.image_buffer_offset = 0  # Track next write position (simple linear allocation)
+
     def send_request(self, data: bytes, timeout: float = 30.0) -> bool:
         """
         Send request from orchestrator to worker.
@@ -250,6 +259,85 @@ class SharedMemoryBridge:
         return self._read_ring_blocking(
             self.resp_header, self.resp_data, timeout, self.resp_sem
         )
+
+    def write_image(self, data: bytes) -> tuple[int, int]:
+        """
+        Write image data to shared memory image buffer.
+
+        Used for large images (≥500KB) that exceed inline base64 limits.
+
+        Args:
+            data: Raw image bytes (JPEG, PNG, etc.)
+
+        Returns:
+            Tuple of (offset, length) for referencing in ImageData
+
+        Raises:
+            ValueError: If image too large or buffer full
+        """
+        data_len = len(data)
+
+        # Validate image size (10MB limit per plan)
+        max_image_size = 10 * 1024 * 1024  # 10MB
+        if data_len > max_image_size:
+            raise ValueError(
+                f"Image too large: {data_len} bytes (max={max_image_size})"
+            )
+
+        # Check if it fits in buffer
+        if self.image_buffer_offset + data_len > self.IMAGE_BUFFER_SIZE:
+            # Buffer full - reset to beginning (simple strategy for Phase 1)
+            # TODO Phase 4: Implement proper memory management with reference counting
+            logger.warning(
+                f"Image buffer full at offset {self.image_buffer_offset}, "
+                f"resetting to beginning"
+            )
+            self.image_buffer_offset = 0
+
+            # Re-check after reset
+            if data_len > self.IMAGE_BUFFER_SIZE:
+                raise ValueError(
+                    f"Image larger than buffer: {data_len} > {self.IMAGE_BUFFER_SIZE}"
+                )
+
+        # Write image data at current offset
+        offset = self.image_buffer_offset
+        self.image_buffer[offset:offset + data_len] = data
+
+        # Update offset for next write
+        self.image_buffer_offset += data_len
+
+        logger.debug(f"Wrote image: {data_len} bytes at offset {offset}")
+        return (offset, data_len)
+
+    def read_image(self, offset: int, length: int) -> bytes:
+        """
+        Read image data from shared memory image buffer.
+
+        Args:
+            offset: Starting offset in image buffer
+            length: Number of bytes to read
+
+        Returns:
+            Raw image bytes
+
+        Raises:
+            ValueError: If offset/length invalid
+        """
+        # Validate bounds
+        if offset < 0 or length < 0:
+            raise ValueError(f"Invalid offset/length: {offset}/{length}")
+
+        if offset + length > self.IMAGE_BUFFER_SIZE:
+            raise ValueError(
+                f"Read beyond buffer: offset={offset}, length={length}, "
+                f"buffer_size={self.IMAGE_BUFFER_SIZE}"
+            )
+
+        # Read from buffer
+        data = bytes(self.image_buffer[offset:offset + length])
+        logger.debug(f"Read image: {length} bytes from offset {offset}")
+        return data
 
     def _write_ring(self, header, data_buf, data: bytes, semaphore: posix_ipc.Semaphore) -> bool:
         """
@@ -473,6 +561,8 @@ class SharedMemoryBridge:
             del self.resp_header
         if hasattr(self, 'resp_data'):
             del self.resp_data
+        if hasattr(self, 'image_buffer'):
+            del self.image_buffer
 
         # Clean up POSIX semaphores (Production-grade resource management)
         if hasattr(self, 'req_sem'):

@@ -22,6 +22,7 @@ wheels/
 
 # Virtual environments
 venv/
+venv-*/
 venv.*/
 ENV/
 env/
@@ -71,3 +72,12 @@ tmp/
 # Private/Internal (not for public repo)
 private/
 opus-submissions/
+
+# Internal documentation (keep local, not for public)
+docs/sessions/              # Session notes
+docs/PROJECT-STATUS.md      # Project tracking
+docs/PHASE3-*.md           # Phase documentation
+docs/DEPLOYMENT-*.md       # Internal deployment notes
+docs/PERFORMANCE-*.md      # Internal performance notes
+docs/VLM-MODEL-RECOMMENDATIONS.md  # Internal model testing
+docs/benchmarks/           # Internal benchmark results
