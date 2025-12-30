@@ -451,25 +451,28 @@ class WorkerManager:
 
         This atomic method prevents this by holding the lock throughout.
 
+        M6: Fixed lock ordering to prevent deadlock - always acquire
+        activity_lock first, then self.lock (consistent with other methods).
+
         Returns:
             UnloadResult if unloaded, None if not idle or no worker
 
         Raises:
             None (silently returns None if conditions not met)
         """
-        with self.lock:
-            # Atomic check: worker exists, no active requests
-            if self.active_worker is None:
+        # M6: Acquire locks in consistent order: activity_lock first, then main lock
+        with self.activity_lock:
+            if self.active_requests > 0:
+                # Not idle - active generation in progress
                 return None
 
-            # Check active requests under same lock as generate()
-            with self.activity_lock:
-                if self.active_requests > 0:
-                    # Not idle - active generation in progress
+            # Now safe to acquire main lock (no deadlock risk)
+            with self.lock:
+                if self.active_worker is None:
                     return None
 
-            # Safe to unload - no race possible since we hold both locks
-            return self._unload_model_internal()
+                # Safe to unload - no race possible since we hold both locks
+                return self._unload_model_internal()
 
     def _unload_model_internal(self) -> UnloadResult:
         """Internal unload (assumes lock held)."""
