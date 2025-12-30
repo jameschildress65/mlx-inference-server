@@ -154,10 +154,15 @@ class WorkerProcess:
         try:
             # Load model
             logger.info(f"Loading model: {self.model_path}")
-            model, tokenizer = self.model_loader.load(self.model_path)
+            model, tokenizer_or_processor = self.model_loader.load(self.model_path)
 
-            # Create inference engine
-            self.inference_engine = InferenceEngine(model, tokenizer)
+            # Phase 3: Detect model capabilities
+            capabilities = ModelLoader.detect_model_capabilities(self.model_path)
+            model_type = "vision" if capabilities["vision"] else "text"
+            logger.info(f"Model type: {model_type} (capabilities: {capabilities})")
+
+            # Create inference engine with appropriate backend
+            self.inference_engine = InferenceEngine(model, tokenizer_or_processor, model_type=model_type)
 
             # Get memory usage
             memory_gb = get_memory_usage_gb()
@@ -192,13 +197,14 @@ class WorkerProcess:
                     # Generate completion
                     try:
                         if request.stream:
-                            # Streaming completion (Phase 2)
+                            # Streaming completion (Phase 2/3)
                             for chunk in self.inference_engine.generate_stream(
                                 prompt=request.prompt,
                                 max_tokens=request.max_tokens,
                                 temperature=request.temperature,
                                 top_p=request.top_p,
-                                repetition_penalty=request.repetition_penalty
+                                repetition_penalty=request.repetition_penalty,
+                                images=request.images  # Phase 3: Pass images for vision models
                             ):
                                 # Send each chunk
                                 self.handler.send_stream_chunk(
@@ -214,7 +220,8 @@ class WorkerProcess:
                                 max_tokens=request.max_tokens,
                                 temperature=request.temperature,
                                 top_p=request.top_p,
-                                repetition_penalty=request.repetition_penalty
+                                repetition_penalty=request.repetition_penalty,
+                                images=request.images  # Phase 3: Pass images for vision models
                             )
 
                             self.handler.send_completion(

@@ -17,26 +17,78 @@ class ModelLoader:
     - Pre-evaluate parameters hierarchically (force memory allocation)
     - Warm up with dummy forward pass (compile Metal shaders)
     - Clear warmup from KV cache (clean state for inference)
+
+    Phase 3: Supports both text-only and vision models (Qwen2-VL, etc.)
     """
+
+    @staticmethod
+    def detect_model_capabilities(model_path: str) -> dict:
+        """
+        Detect model capabilities from model path.
+
+        Args:
+            model_path: HuggingFace model path
+
+        Returns:
+            Dict with capabilities: {"text": bool, "vision": bool, "detection_method": str}
+        """
+        vision_patterns = [
+            "qwen2-vl",
+            "qwen2.5-vl",
+            "-vl-",
+            "llava",
+            "idefics"
+        ]
+
+        model_lower = model_path.lower()
+        is_vision = any(pattern in model_lower for pattern in vision_patterns)
+
+        return {
+            "text": True,  # All models support text
+            "vision": is_vision,
+            "detection_method": "model_name"
+        }
 
     def load(self, model_path: str) -> Tuple[Any, Any]:
         """
         Load MLX model and tokenizer with Apple Silicon optimizations.
 
+        Routes to vision or text loader based on model capabilities.
+
         Args:
             model_path: HuggingFace model path (e.g., "mlx-community/Qwen2.5-7B-Instruct-4bit")
 
         Returns:
-            Tuple of (model, tokenizer)
+            Tuple of (model, tokenizer/processor)
 
         Raises:
             Exception: If model loading fails
+        """
+        # Phase 3: Detect model capabilities
+        capabilities = self.detect_model_capabilities(model_path)
+
+        if capabilities["vision"]:
+            logger.info(f"Detected vision model: {model_path}")
+            return self._load_vision_model(model_path)
+        else:
+            logger.info(f"Detected text-only model: {model_path}")
+            return self._load_text_model(model_path)
+
+    def _load_text_model(self, model_path: str) -> Tuple[Any, Any]:
+        """
+        Load text-only MLX model (original implementation).
+
+        Args:
+            model_path: HuggingFace model path
+
+        Returns:
+            Tuple of (model, tokenizer)
         """
         try:
             import mlx.core as mx
             from mlx_lm import load
 
-            logger.info(f"Loading model from: {model_path}")
+            logger.info(f"Loading text model from: {model_path}")
 
             # OPTIMIZATION 1: Clear Metal cache before load (Opus 4.5 recommendation)
             # Ensures clean GPU state, prevents fragmentation from previous loads
@@ -150,3 +202,126 @@ class ModelLoader:
         except Exception as e:
             # Warmup failure is not critical - log and continue
             logger.debug(f"Model warmup failed (non-critical): {e}")
+
+    def _load_vision_model(self, model_path: str) -> Tuple[Any, Any]:
+        """
+        Load vision model using mlx-vlm.
+
+        Phase 3: Vision model loading with same Metal optimizations as text models.
+
+        Args:
+            model_path: HuggingFace model path for vision model
+
+        Returns:
+            Tuple of (model, processor)
+
+        Raises:
+            Exception: If mlx-vlm not installed or model loading fails
+        """
+        try:
+            import mlx.core as mx
+
+            # Check mlx-vlm availability
+            try:
+                from mlx_vlm import load as vlm_load
+                from mlx_vlm import generate as vlm_generate
+            except ImportError:
+                raise Exception(
+                    "mlx-vlm is required for vision models. "
+                    "Install: pip install mlx-vlm pillow"
+                )
+
+            logger.info(f"Loading vision model from: {model_path}")
+
+            # OPTIMIZATION 1: Clear Metal cache before load (same as text models)
+            gc.collect()
+            mx.metal.clear_cache()
+            mx.synchronize()
+
+            start_memory = mx.metal.get_active_memory() / (1024**3)
+            start_time = time.perf_counter()
+
+            # Load vision model and processor
+            model, processor = vlm_load(model_path)
+
+            # OPTIMIZATION 2: Pre-evaluate parameters (same as text models)
+            logger.debug("Pre-evaluating vision model parameters...")
+            self._eval_parameters_recursive(model, mx)
+            mx.synchronize()
+
+            # OPTIMIZATION 3: Warm up vision model
+            logger.debug("Warming up vision inference path...")
+            self._warmup_vision_model(model, processor, mx)
+            mx.synchronize()
+
+            # Calculate load stats
+            load_time = time.perf_counter() - start_time
+            memory_used = (mx.metal.get_active_memory() / (1024**3)) - start_memory
+
+            logger.info(
+                f"Vision model loaded successfully: {model_path} "
+                f"({memory_used:.2f} GB in {load_time:.1f}s)"
+            )
+
+            return model, processor
+
+        except ImportError as e:
+            logger.error(f"mlx-vlm not installed: {e}")
+            raise Exception(f"mlx-vlm not available: {e}")
+
+        except Exception as e:
+            logger.error(f"Failed to load vision model: {e}", exc_info=True)
+            raise Exception(f"Vision model load failed: {e}")
+
+    @staticmethod
+    def _warmup_vision_model(model: Any, processor: Any, mx: Any) -> None:
+        """
+        Warm up vision model with dummy inference.
+
+        Similar to text model warmup but with image input.
+
+        Args:
+            model: Vision model
+            processor: Vision processor
+            mx: MLX module
+        """
+        try:
+            from PIL import Image
+            import io
+
+            # Create tiny dummy image (1x1 red pixel)
+            dummy_img = Image.new('RGB', (1, 1), color='red')
+
+            # Dummy prompt
+            dummy_prompt = "Hello"
+
+            # Try vision inference warmup
+            # Note: mlx-vlm handles preprocessing internally
+            try:
+                from mlx_vlm.prompt_utils import apply_chat_template
+                from mlx_vlm import generate as vlm_generate
+
+                # Apply chat template for vision
+                # Get model config if available
+                config = model.config if hasattr(model, 'config') else {}
+                formatted_prompt = apply_chat_template(
+                    processor, config, dummy_prompt, num_images=1
+                )
+
+                # Dummy generation (just to compile shaders)
+                _ = vlm_generate(
+                    model, processor,
+                    formatted_prompt,
+                    image=dummy_img,
+                    max_tokens=1,
+                    verbose=False
+                )
+
+            except Exception as e:
+                # Warmup failure is non-critical
+                logger.debug(f"Vision warmup failed (non-critical): {e}")
+
+            mx.synchronize()
+
+        except Exception as e:
+            logger.debug(f"Vision warmup failed (non-critical): {e}")
