@@ -374,3 +374,163 @@ class TestAdminAPIEndpoints:
 
         assert response.status_code == 400
         assert "No model loaded" in response.json()["detail"]
+
+    def test_admin_capabilities_no_model(self, mock_config, mock_worker_manager):
+        """Test GET /admin/capabilities with no model loaded."""
+        mock_worker_manager.get_status.return_value = {
+            "model_loaded": False,
+            "model_name": None,
+            "memory_gb": 0.0
+        }
+
+        app = create_admin_app(mock_config, mock_worker_manager)
+        client = TestClient(app)
+
+        response = client.get("/admin/capabilities")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["model"] is None
+        assert data["capabilities"]["text"] is True
+        assert data["capabilities"]["vision"] is False
+        assert data["detection_method"] == "no_model_loaded"
+
+    def test_admin_capabilities_text_model(self, mock_config, mock_worker_manager):
+        """Test GET /admin/capabilities with text-only model."""
+        mock_worker_manager.get_status.return_value = {
+            "model_loaded": True,
+            "model_name": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "memory_gb": 4.5
+        }
+
+        app = create_admin_app(mock_config, mock_worker_manager)
+        client = TestClient(app)
+
+        response = client.get("/admin/capabilities")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["model"] == "mlx-community/Qwen2.5-7B-Instruct-4bit"
+        assert data["capabilities"]["text"] is True
+        assert data["capabilities"]["vision"] is False
+        assert data["detection_method"] == "model_name"
+
+    def test_admin_capabilities_vision_model(self, mock_config, mock_worker_manager):
+        """Test GET /admin/capabilities with vision model."""
+        mock_worker_manager.get_status.return_value = {
+            "model_loaded": True,
+            "model_name": "mlx-community/Qwen2-VL-7B-Instruct-4bit",
+            "memory_gb": 6.0
+        }
+
+        app = create_admin_app(mock_config, mock_worker_manager)
+        client = TestClient(app)
+
+        response = client.get("/admin/capabilities")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["model"] == "mlx-community/Qwen2-VL-7B-Instruct-4bit"
+        assert data["capabilities"]["text"] is True
+        assert data["capabilities"]["vision"] is True
+        assert data["detection_method"] == "model_name"
+        assert data["mlx_vlm_available"] is not None  # Boolean value
+
+
+class TestMultimodalContentParsing:
+    """Tests for Vision/Multimodal content block parsing (Phase 1)."""
+
+    def test_chat_message_text_only_backward_compatible(self, mock_config, mock_worker_manager):
+        """Test ChatMessage accepts text-only content (backward compatible)."""
+        mock_worker_manager.get_status.return_value = {
+            "model_loaded": True,
+            "model_name": "test-model",
+            "memory_gb": 4.5
+        }
+
+        mock_worker_manager.generate.return_value = {
+            "text": "Response",
+            "tokens": 1,
+            "finish_reason": "stop"
+        }
+
+        app = create_app(mock_config, mock_worker_manager)
+        client = TestClient(app)
+
+        # Text-only format (backward compatible)
+        response = client.post("/v1/chat/completions", json={
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Hello"}  # String content
+            ],
+            "max_tokens": 10
+        })
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["object"] == "chat.completion"
+
+    def test_chat_message_multimodal_content_blocks(self, mock_config, mock_worker_manager):
+        """Test ChatMessage accepts multimodal content blocks."""
+        mock_worker_manager.get_status.return_value = {
+            "model_loaded": True,
+            "model_name": "mlx-community/Qwen2-VL-7B-Instruct-4bit",
+            "memory_gb": 6.0
+        }
+
+        mock_worker_manager.generate.return_value = {
+            "text": "I see a cat",
+            "tokens": 4,
+            "finish_reason": "stop"
+        }
+
+        app = create_app(mock_config, mock_worker_manager)
+        client = TestClient(app)
+
+        # Multimodal format with content blocks
+        response = client.post("/v1/chat/completions", json={
+            "model": "mlx-community/Qwen2-VL-7B-Instruct-4bit",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [  # List of content blocks
+                        {"type": "text", "text": "What's in this image?"},
+                        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+                    ]
+                }
+            ],
+            "max_tokens": 20
+        })
+
+        # Phase 2: If Pillow not installed, should return 400 with helpful message
+        # Otherwise, would need vision model (Phase 3) to complete successfully
+        if response.status_code == 400:
+            # Expected when Pillow not installed
+            response_data = response.json()
+            detail = response_data.get("detail", str(response_data))
+            assert "Pillow" in detail or "PIL" in detail
+        else:
+            # If Pillow is installed, request should be accepted (Phase 3+ will implement inference)
+            assert response.status_code == 200
+
+    def test_chat_message_rejects_invalid_content_type(self, mock_config, mock_worker_manager):
+        """Test ChatMessage rejects invalid content types."""
+        mock_worker_manager.get_status.return_value = {
+            "model_loaded": True,
+            "model_name": "test-model",
+            "memory_gb": 4.5
+        }
+
+        app = create_app(mock_config, mock_worker_manager)
+        client = TestClient(app)
+
+        # Invalid content type (should be str or list, not int)
+        response = client.post("/v1/chat/completions", json={
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": 123}  # Invalid: int
+            ],
+            "max_tokens": 10
+        })
+
+        assert response.status_code == 422  # Validation error

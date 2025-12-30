@@ -45,6 +45,20 @@ class PongMessage(BaseModel):
 
 # Orchestrator → Worker Messages
 
+class ImageData(BaseModel):
+    """Image data for vision/multimodal requests.
+
+    Two-tier strategy:
+    - Small images (<500KB): inline base64 encoding
+    - Large images (≥500KB): shared memory with offset/length
+    """
+    type: Literal["inline", "shmem"] = "inline"
+    data: Optional[str] = None  # base64 encoded image (inline mode)
+    offset: Optional[int] = None  # shared memory offset (shmem mode)
+    length: Optional[int] = None  # shared memory length (shmem mode)
+    format: str = "jpeg"  # Image format: jpeg, png, webp, bmp, etc.
+
+
 class CompletionRequest(BaseModel):
     """Orchestrator sends this to request generation."""
     type: Literal["completion"] = "completion"
@@ -55,6 +69,7 @@ class CompletionRequest(BaseModel):
     top_p: float = 1.0
     repetition_penalty: float = 1.1
     stream: bool = False
+    images: Optional[list[ImageData]] = None  # Vision/multimodal support
 
 
 class PingMessage(BaseModel):

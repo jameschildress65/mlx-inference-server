@@ -320,8 +320,34 @@ class WorkerManager:
             # Spawn worker subprocess
             self.logger.info(f"Spawning worker #{worker_id} for model: {model_path}")
             try:
+                # Phase 3: Detect model capabilities and route to appropriate venv
+                from src.worker.model_loader import ModelLoader
+                capabilities = ModelLoader.detect_model_capabilities(model_path)
+
+                # Choose Python executable based on model type
+                if capabilities["vision"]:
+                    # Vision models use venv-vision with mlx-vlm
+                    python_exe = os.path.join(os.getcwd(), "venv-vision", "bin", "python")
+
+                    # Validate venv-vision exists (Opus security recommendation)
+                    if not os.path.exists(python_exe):
+                        raise EnvironmentError(
+                            f"Vision environment not found: {python_exe}\n"
+                            f"Vision models require venv-vision with mlx-vlm.\n"
+                            f"Install with:\n"
+                            f"  python3 -m venv venv-vision\n"
+                            f"  venv-vision/bin/pip install mlx-vlm pillow transformers>=4.44.0,<5.0\n"
+                            f"  venv-vision/bin/pip install setproctitle pyyaml posix-ipc"
+                        )
+
+                    self.logger.info(f"Using vision venv for vision model: {model_path}")
+                else:
+                    # Text models use main venv with mlx-lm
+                    python_exe = sys.executable
+                    self.logger.info(f"Using text venv for text model: {model_path}")
+
                 worker_module = "src.worker"  # python -m src.worker
-                worker_args = [sys.executable, "-m", worker_module, model_path, str(worker_id)]
+                worker_args = [python_exe, "-m", worker_module, model_path, str(worker_id)]
 
                 # Prepare environment with shared memory name (if using shmem)
                 worker_env = os.environ.copy()

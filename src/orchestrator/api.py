@@ -2,7 +2,7 @@
 
 import logging
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union, Literal
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -12,6 +12,7 @@ from ..ipc.messages import CompletionRequest as IPCCompletionRequest
 from ..ipc.shared_memory_bridge import WorkerCommunicationError
 # StdioBridge no longer used directly - WorkerManager handles IPC abstraction
 from ..config.server_config import ServerConfig
+from .image_utils import prepare_images, ImageProcessingError
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +61,33 @@ class CompletionResponse(BaseModel):
     usage: Dict[str, int]
 
 
+# Vision/Multimodal Support - Content Block Models
+
+class TextContent(BaseModel):
+    """Text content block for multimodal messages."""
+    type: Literal["text"] = "text"
+    text: str
+
+
+class ImageUrlContent(BaseModel):
+    """Image URL content block for multimodal messages."""
+    type: Literal["image_url"] = "image_url"
+    image_url: dict  # {"url": "data:image/jpeg;base64,..." or "https://..."}
+
+
+# Union type for content blocks
+ContentBlock = Union[TextContent, ImageUrlContent]
+
+
 class ChatMessage(BaseModel):
-    """Chat message."""
+    """Chat message with optional multimodal content.
+
+    Supports both text-only (backward compatible) and multimodal formats:
+    - Text-only: content = "Hello"
+    - Multimodal: content = [{"type": "text", "text": "..."}, {"type": "image_url", ...}]
+    """
     role: str
-    content: str
+    content: Union[str, list[ContentBlock]]  # Backward compatible with text-only
 
 
 class ChatCompletionRequest(BaseModel):
@@ -298,6 +322,37 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                 load_result = worker_manager.load_model(request.model)
                 logger.info(f"Model loaded: {load_result.model_name} ({load_result.memory_gb:.2f} GB)")
 
+            # Phase 2: Image preprocessing for vision/multimodal requests
+            images = None
+            has_images = any(
+                isinstance(msg.content, list) and
+                any(hasattr(block, 'type') and block.type == 'image_url' for block in msg.content)
+                for msg in request.messages
+            )
+
+            if has_images:
+                logger.info("Vision/multimodal request detected - preprocessing images")
+                try:
+                    # Collect all content blocks from all messages
+                    all_content_blocks = []
+                    for msg in request.messages:
+                        if isinstance(msg.content, list):
+                            all_content_blocks.extend(msg.content)
+
+                    # Get bridge for large images (if using shared memory)
+                    bridge = worker_manager.bridge if hasattr(worker_manager, 'bridge') else None
+
+                    # Preprocess images
+                    images = await prepare_images(all_content_blocks, bridge=bridge)
+                    logger.info(f"Preprocessed {len(images)} images for request")
+                except ImportError as e:
+                    # Pillow/mlx-vlm not installed
+                    logger.warning(f"Missing dependency for vision: {e}")
+                    raise HTTPException(status_code=400, detail=str(e))
+                except ImageProcessingError as e:
+                    logger.warning(f"Image preprocessing failed: {e}")
+                    raise HTTPException(status_code=400, detail=f"Image processing error: {e}")
+
             # Create IPC request
             ipc_request = IPCCompletionRequest(
                 model=request.model,
@@ -306,7 +361,8 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                 temperature=request.temperature,
                 top_p=request.top_p,
                 repetition_penalty=request.repetition_penalty,
-                stream=request.stream
+                stream=request.stream,
+                images=images  # Pass preprocessed images (None for text-only)
             )
 
             # Generate
@@ -503,6 +559,50 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
                 "total_ram_gb": config.total_ram_gb,
                 "idle_timeout_seconds": config.idle_timeout_seconds
             }
+        }
+
+    @app.get("/admin/capabilities")
+    async def admin_capabilities():
+        """
+        Get model capabilities (text/vision support).
+
+        Returns:
+            Model capabilities and mlx-vlm availability
+        """
+        status = worker_manager.get_status()
+        model_name = status["model_name"]
+
+        # Detect vision capability from model name
+        vision_patterns = ["qwen2-vl", "qwen2.5-vl", "-vl-", "llava", "idefics"]
+        is_vision = False
+        detection_method = "model_name"
+
+        if model_name:
+            model_lower = model_name.lower()
+            is_vision = any(pattern in model_lower for pattern in vision_patterns)
+        else:
+            detection_method = "no_model_loaded"
+
+        # Check mlx-vlm availability
+        mlx_vlm_available = False
+        try:
+            import mlx_vlm
+            mlx_vlm_available = True
+        except ImportError:
+            pass
+
+        return {
+            "model": model_name,
+            "capabilities": {
+                "text": True,  # All models support text
+                "vision": is_vision
+            },
+            "detection_method": detection_method,
+            "mlx_vlm_available": mlx_vlm_available,
+            "notes": (
+                "Vision models require mlx-vlm package. "
+                "Install: pip install mlx-vlm pillow"
+            ) if is_vision and not mlx_vlm_available else None
         }
 
     @app.post("/admin/load")
