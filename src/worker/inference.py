@@ -453,18 +453,29 @@ class VisionInferenceBackend(InferenceBackend):
             logger.error(f"Vision model inference failed: {e}", exc_info=True)
             raise Exception(f"Vision model generation failed: {e}") from e
 
-        # Parse output (mlx-vlm returns string)
-        if not output:
+        # Parse output (mlx-vlm may return GenerationResult object or string)
+        # Handle both cases for API compatibility
+        if hasattr(output, 'text'):
+            # GenerationResult object (newer mlx-vlm)
+            output_text = output.text if output.text else ""
+        elif isinstance(output, str):
+            # Direct string (older mlx-vlm)
+            output_text = output
+        else:
+            logger.warning(f"Unexpected output type: {type(output)}")
+            output_text = str(output) if output else ""
+
+        if not output_text:
             logger.warning("Vision model returned empty output")
-            output = ""
+            output_text = ""
 
         # Estimate tokens (rough approximation)
-        tokens = len(output.split())
+        tokens = len(output_text.split())
 
-        logger.debug(f"Generated vision response: {len(output)} chars, ~{tokens} tokens")
+        logger.debug(f"Generated vision response: {len(output_text)} chars, ~{tokens} tokens")
 
         return {
-            "text": output,
+            "text": output_text,
             "tokens": tokens,
             "finish_reason": "stop"
         }

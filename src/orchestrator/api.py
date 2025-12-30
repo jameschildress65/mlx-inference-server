@@ -325,7 +325,21 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
             logger.warning(f"Failed to apply chat template for {request.model}: {e}")
             logger.warning("Falling back to simple concatenation")
             # Fallback to simple concatenation if template fails
-            prompt = "\n".join([f"{msg.role}: {msg.content}" for msg in request.messages])
+            # Handle multimodal content (list of content blocks)
+            prompt_parts = []
+            for msg in request.messages:
+                if isinstance(msg.content, list):
+                    # Multimodal: extract text blocks only (skip images)
+                    text_parts = [
+                        block.text for block in msg.content
+                        if hasattr(block, 'type') and block.type == 'text'
+                    ]
+                    content_str = " ".join(text_parts)
+                else:
+                    # Text-only
+                    content_str = msg.content
+                prompt_parts.append(f"{msg.role}: {content_str}")
+            prompt = "\n".join(prompt_parts)
 
         try:
             # Check if model is loaded, if not load it
