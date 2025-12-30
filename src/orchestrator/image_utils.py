@@ -177,6 +177,7 @@ async def fetch_image(url: str) -> Tuple[bytes, str]:
         raise InvalidImageError(f"URL blocked by SSRF protection: {error_msg}")
 
     try:
+        # M5: Improved timeout handling with separate connect/total timeouts
         # Use asyncio subprocess to run curl with timeout
         # This avoids adding httpx/aiohttp dependencies
         process = await asyncio.create_subprocess_exec(
@@ -184,8 +185,9 @@ async def fetch_image(url: str) -> Tuple[bytes, str]:
             '-L',  # Follow redirects
             '-s',  # Silent
             '-f',  # Fail on HTTP errors
+            '--connect-timeout', '5',  # Connection timeout (separate from transfer)
+            '--max-time', str(int(URL_TIMEOUT_SECONDS)),  # Total transfer time
             '--max-filesize', str(MAX_IMAGE_SIZE),  # Size limit
-            '--max-time', str(int(URL_TIMEOUT_SECONDS)),  # Timeout
             url,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
@@ -193,7 +195,7 @@ async def fetch_image(url: str) -> Tuple[bytes, str]:
 
         stdout, stderr = await asyncio.wait_for(
             process.communicate(),
-            timeout=URL_TIMEOUT_SECONDS + 2  # Extra buffer
+            timeout=URL_TIMEOUT_SECONDS + 1  # Small buffer for process cleanup
         )
 
         if process.returncode != 0:
@@ -219,6 +221,12 @@ async def fetch_image(url: str) -> Tuple[bytes, str]:
         return (image_bytes, format_str)
 
     except asyncio.TimeoutError:
+        # M5: Properly kill process on timeout
+        try:
+            process.kill()
+            await process.wait()
+        except Exception:
+            pass  # Process may already be dead
         raise ImageDownloadError(f"Timeout downloading image from {url} after {URL_TIMEOUT_SECONDS}s")
     except ImageDownloadError:
         raise  # Re-raise our custom errors

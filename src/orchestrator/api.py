@@ -235,8 +235,9 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                                 yield f"data: {json.dumps(format_openai_error(chunk.message))}\n\n"
                                 break
                     except Exception as e:
-                        logger.error(f"Streaming error: {e}")
-                        yield f"data: {json.dumps(format_openai_error(str(e)))}\n\n"
+                        # M2: Don't expose internal details in streaming errors
+                        logger.error(f"Streaming error: {e}", exc_info=True)
+                        yield f"data: {json.dumps(format_openai_error('Internal server error'))}\n\n"
 
                 return StreamingResponse(generate_stream(), media_type="text/event-stream")
             else:
@@ -287,8 +288,9 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
             logger.error(f"Worker error: {e}")
             raise HTTPException(status_code=500, detail=str(e))
         except Exception as e:
+            # M2: Don't expose internal details to client
             logger.error(f"Unexpected error: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Internal error: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     # V1 Chat completions endpoint
     @app.post("/v1/chat/completions")
@@ -406,8 +408,9 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                                 yield f"data: {json.dumps(format_openai_error(chunk.message))}\n\n"
                                 break
                     except Exception as e:
-                        logger.error(f"Streaming error: {e}")
-                        yield f"data: {json.dumps(format_openai_error(str(e)))}\n\n"
+                        # M2: Don't expose internal details in streaming errors
+                        logger.error(f"Streaming error: {e}", exc_info=True)
+                        yield f"data: {json.dumps(format_openai_error('Internal server error'))}\n\n"
 
                 return StreamingResponse(generate_stream(), media_type="text/event-stream")
             else:
@@ -472,8 +475,9 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
             logger.error(f"Worker error: {e}")
             raise HTTPException(status_code=500, detail=str(e))
         except Exception as e:
+            # M2: Don't expose internal details to client
             logger.error(f"Unexpected error: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Internal error: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     # Models list endpoint
     @app.get("/v1/models")
@@ -636,8 +640,9 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
                 "load_time": result.load_time
             }
         except Exception as e:
-            logger.error(f"Load failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            # M2: Don't expose internal details to client
+            logger.error(f"Load failed: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to load model")
 
     @app.post("/admin/unload")
     async def admin_unload():
@@ -653,7 +658,8 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
         except NoModelLoadedError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            logger.error(f"Unload failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            # M2: Don't expose internal details to client
+            logger.error(f"Unload failed: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to unload model")
 
     return app
