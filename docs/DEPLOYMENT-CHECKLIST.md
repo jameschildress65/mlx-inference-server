@@ -74,8 +74,47 @@ Use this checklist for deploying to new machines.
   python -c "import mlx.core as mx; print(f'MLX: {mx.__version__}')"
   python -c "import fastapi; print('FastAPI: OK')"
   python -c "import posix_ipc; print('posix_ipc: OK')"
+  python -c "from PIL import Image; print('Pillow: OK')"
+  python -c "import fitz; print('PyMuPDF: OK')"
   ```
-  All three should succeed
+  All should succeed
+
+---
+
+## Vision Support Setup (Optional)
+
+**Skip this section if you only need text inference.**
+
+- [ ] **Create vision virtual environment**
+  ```bash
+  python3 -m venv venv-vision
+  ```
+
+- [ ] **Activate vision environment**
+  ```bash
+  source venv-vision/bin/activate
+  ```
+  Prompt should show `(venv-vision)` prefix
+
+- [ ] **Install vision dependencies**
+  ```bash
+  pip install --upgrade pip
+  pip install -r requirements-vision.txt
+  ```
+  Wait 5-10 minutes (PyTorch is large)
+
+- [ ] **Verify vision dependencies**
+  ```bash
+  python -c "import mlx_vlm; print('mlx-vlm: OK')"
+  python -c "from PIL import Image; print('Pillow: OK')"
+  python -c "import torch; print('PyTorch: OK')"
+  python -c "import torchvision; print('Torchvision: OK')"
+  ```
+
+- [ ] **Deactivate vision environment**
+  ```bash
+  deactivate
+  ```
 
 ---
 
