@@ -17,11 +17,22 @@
 
 ---
 
+## CRITICAL: Deployment Location
+
+**DEPLOY TO:** `~/projects/mlx-inference-server` ✅
+
+**DO NOT TOUCH:** `~/Documents/projects/utilities/mlx-inference-server` ❌
+- This is iCloud-synced SOURCE CODE
+- Never deploy/run services from here
+- Pull code from GitHub to ~/projects instead
+
+---
+
 ## Step 1: Stop Existing Service (If Running)
 
 ```bash
 # Check if server is running
-cd ~/Documents/projects/utilities/mlx-inference-server
+cd ~/projects/mlx-inference-server
 ./bin/mlx-inference-server-daemon.sh status
 
 # If running, stop it
@@ -35,11 +46,17 @@ cd ~/Documents/projects/utilities/mlx-inference-server
 
 ---
 
-## Step 2: Pull Latest Code
+## Step 2: Clone or Pull Latest Code
 
 ```bash
+# If directory doesn't exist, clone from GitHub
+if [ ! -d ~/projects/mlx-inference-server ]; then
+  cd ~/projects
+  git clone https://github.com/jameschildress65/mlx-inference-server.git
+fi
+
 # Navigate to project
-cd ~/Documents/projects/utilities/mlx-inference-server
+cd ~/projects/mlx-inference-server
 
 # Pull latest from GitHub
 git pull origin main
