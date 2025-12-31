@@ -122,13 +122,7 @@ source venv-vision/bin/activate
 
 # Install vision dependencies
 pip install --upgrade pip
-pip install mlx-vlm pillow transformers>=4.44.0,<5.0
-
-# Install PyTorch dependencies (required by mlx-vlm's AutoVideoProcessor)
-pip install torch torchvision
-
-# Install server dependencies (needed in both envs)
-pip install setproctitle pyyaml posix-ipc
+pip install -r requirements-vision.txt
 
 # Verify installation
 python -c "import mlx_vlm; print('mlx-vlm installed')"
