@@ -202,6 +202,7 @@ See [docs/API-REFERENCE.md](docs/API-REFERENCE.md) for complete API documentatio
 ## Documentation
 
 - [API Reference](docs/API-REFERENCE.md) - Complete API documentation
+- [Vision API Specification](docs/VISION-API-SPEC.md) - Vision/multimodal API for integrators
 - [Deployment Guide](docs/DEPLOYMENT-GUIDE.md) - Production deployment
 - [Security Best Practices](docs/SECURITY-BEST-PRACTICES.md) - Security hardening
 - [Performance Tuning](docs/PERFORMANCE-TUNING.md) - Optimization guide
