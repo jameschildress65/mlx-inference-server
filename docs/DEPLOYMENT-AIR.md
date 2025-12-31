@@ -92,8 +92,13 @@ source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 
+# Install additional dependencies for image/PDF processing
+pip install pillow PyMuPDF
+
 # Verify installation
 python -c "import mlx_lm; print('mlx_lm installed')"
+python -c "import PIL; print('Pillow installed')"
+python -c "import fitz; print('PyMuPDF installed')"
 
 # Deactivate
 deactivate
@@ -119,12 +124,17 @@ source venv-vision/bin/activate
 pip install --upgrade pip
 pip install mlx-vlm pillow transformers>=4.44.0,<5.0
 
+# Install PyTorch dependencies (required by mlx-vlm's AutoVideoProcessor)
+pip install torch torchvision
+
 # Install server dependencies (needed in both envs)
 pip install setproctitle pyyaml posix-ipc
 
 # Verify installation
 python -c "import mlx_vlm; print('mlx-vlm installed')"
 python -c "from PIL import Image; print('PIL installed')"
+python -c "import torch; print('PyTorch installed')"
+python -c "import torchvision; print('Torchvision installed')"
 
 # Deactivate
 deactivate
@@ -271,6 +281,52 @@ python3 /tmp/test_vision.py
 - First request: 5-10 second delay (model loading)
 - Response mentions "red" color
 - Speed: ~54-95 tok/s
+
+**Note:** Synthetic uniform color images may have quirks. For production validation, test with real documents:
+
+```bash
+# Test with real PDF (recommended)
+# Requires PyMuPDF (installed in Step 3)
+python3 << 'EOF'
+import requests
+import base64
+import fitz  # PyMuPDF
+
+# Convert PDF to image (DPI 72 recommended for <10MB limit)
+pdf_path = "path/to/your/document.pdf"
+doc = fitz.open(pdf_path)
+page = doc[0]
+pix = page.get_pixmap(dpi=72)
+img_bytes = pix.pil_tobytes(format="PNG")
+
+# Encode and send
+img_b64 = base64.b64encode(img_bytes).decode()
+data_uri = f"data:image/png;base64,{img_b64}"
+
+response = requests.post(
+    "http://localhost:11440/v1/chat/completions",
+    json={
+        "model": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this document and extract key information."},
+                {"type": "image_url", "image_url": {"url": data_uri}}
+            ]
+        }],
+        "max_tokens": 500
+    },
+    timeout=120
+)
+
+print(response.json()['choices'][0]['message']['content'])
+EOF
+```
+
+**PDF Processing Limits:**
+- DPI 72: Safe for most documents (<2MB per page)
+- DPI 150+: May exceed 10MB image limit on complex pages
+- For large images: Use shared memory bridge (see VISION-API-SPEC.md)
 
 ---
 
