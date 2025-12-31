@@ -345,13 +345,13 @@ posix_ipc>=1.0.0
 ✅ **M4 Mini deployment validated**
 ✅ **All functionality working**
 ✅ **Documentation accurate**
-✅ **Ready for friend's M1 MacBook deployment**
+✅ **Ready for M1 MacBook deployment**
 
 ---
 
-## Next Deployment: Friend's M1 MacBook
+## Next Deployment: M1 MacBook
 
-**Instructions for friend:**
+**Deployment Instructions:**
 
 1. Clone repo:
    ```bash
@@ -367,7 +367,7 @@ posix_ipc>=1.0.0
    - Text speed: 50-70 tok/s (M1 performance)
    - Vision: Should work correctly
 
-4. Report any issues back to user
+4. Report any issues via GitHub Issues
 
 ---
 

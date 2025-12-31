@@ -359,7 +359,7 @@ curl http://localhost:11440/health
 
 ### Start Server
 ```bash
-cd /Users/jameschildress/Documents/projects/utilities/mlx-inference-server
+cd ~/projects/mlx-inference-server
 ./bin/mlx-inference-server-daemon.sh start
 ```
 
