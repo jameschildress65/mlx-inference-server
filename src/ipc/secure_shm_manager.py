@@ -90,6 +90,8 @@ class SecureSharedMemoryManager:
         self.registry = registry or SharedMemoryRegistry()
         self.shm: Optional[shared_memory.SharedMemory] = None
         self._closed = False
+        self._unlinked = False
+        self._cleanup_lock = threading.RLock()  # Reentrant for signal safety
 
         if is_server:
             self._create_server()
@@ -144,11 +146,8 @@ class SecureSharedMemoryManager:
             # Attach to existing shared memory
             self.shm = shared_memory.SharedMemory(name=self.name)
 
-            # Unregister from resource tracker (server manages lifecycle)
-            try:
-                resource_tracker.unregister(self.shm._name, "shared_memory")
-            except Exception as e:
-                logger.debug(f"Could not unregister from resource tracker: {e}")
+            # Client doesn't own lifecycle - unregister immediately
+            self._unregister_from_tracker_safe()
 
             logger.info(
                 f"Attached to secure shared memory: {self.name} "
@@ -161,6 +160,25 @@ class SecureSharedMemoryManager:
                 "Server must create before worker attaches."
             )
             raise
+
+    def _unregister_from_tracker_safe(self):
+        """
+        Safely unregister from resource tracker.
+
+        Handles KeyError (already unregistered) gracefully.
+        This is necessary because multiple cleanup paths may attempt to unregister.
+        """
+        if self.shm is None:
+            return
+
+        try:
+            resource_tracker.unregister(self.shm._name, "shared_memory")
+            logger.debug(f"Unregistered from resource tracker: {self.shm._name}")
+        except KeyError:
+            # Already unregistered - this is fine
+            logger.debug(f"Already unregistered from tracker: {self.shm._name}")
+        except Exception as e:
+            logger.debug(f"Could not unregister from resource tracker: {e}")
 
     @staticmethod
     def _generate_secure_name() -> str:
@@ -336,64 +354,68 @@ class SecureSharedMemoryManager:
         """
         Clean up shared memory with security hardening.
 
+        Thread-safe cleanup with RLock to prevent TOCTOU race where
+        multiple threads could enter cleanup simultaneously.
+
         Steps:
         1. Zero memory (prevent data leakage)
-        2. Close shared memory
-        3. Unlink (if server)
-        4. Unregister from registry
+        2. Unregister from resource tracker (prevent double-cleanup)
+        3. Close shared memory handle
+        4. Unlink (if server)
+        5. Unregister from registry
         """
-        if self._closed or self.shm is None:
-            return
+        with self._cleanup_lock:
+            if self._closed:
+                return
 
-        self._closed = True
+            self._closed = True
 
-        try:
-            # Step 1: Zero memory before unlinking (security - server only)
-            if self.is_server:
-                try:
-                    logger.debug(f"Zeroing shared memory: {self.name}")
-                    success = self._secure_zero_memory(self.shm)
-                    if not success:
-                        logger.warning(f"Memory zeroing verification failed for {self.name}")
-                except Exception as e:
-                    logger.warning(f"Could not zero memory: {e}")
+            if self.shm is None:
+                return
 
-            # Step 2: Close shared memory
             try:
-                self.shm.close()
-            except Exception as e:
-                logger.warning(f"Error closing shared memory: {e}")
-
-            # Step 3: Unlink if server
-            if self.is_server:
-                try:
-                    # Unregister from Python's resource_tracker BEFORE unlinking
-                    # to prevent KeyError when tracker tries to cleanup later
-                    # Use shm._name (includes '/' prefix) to match registration format
+                # Step 1: Zero memory before unlinking (security - server only)
+                if self.is_server:
                     try:
-                        from multiprocessing import resource_tracker
-                        resource_tracker.unregister(self.shm._name, "shared_memory")
-                        logger.debug(f"Unregistered from resource tracker: {self.shm._name}")
+                        logger.debug(f"Zeroing shared memory: {self.name}")
+                        success = self._secure_zero_memory(self.shm)
+                        if not success:
+                            logger.warning(f"Memory zeroing verification failed for {self.name}")
                     except Exception as e:
-                        logger.debug(f"Could not unregister from resource tracker: {e}")
+                        logger.warning(f"Could not zero memory: {e}")
 
-                    self.shm.unlink()
-                    logger.debug(f"Unlinked shared memory: {self.name}")
+                # Step 2: Close shared memory handle
+                try:
+                    self.shm.close()
                 except Exception as e:
-                    logger.warning(f"Error unlinking shared memory: {e}")
+                    logger.warning(f"Error closing shared memory: {e}")
 
-            # Step 4: Unregister from registry
-            try:
-                self.registry.unregister(self.name)
-            except Exception as e:
-                logger.warning(f"Error unregistering from registry: {e}")
+                # Step 3: Unlink if server (unlink() handles resource tracker unregister internally)
+                if self.is_server and not self._unlinked:
+                    try:
+                        # Python's unlink() internally calls resource_tracker.unregister()
+                        # so we don't need to manually unregister - it would cause double-unregister
+                        self.shm.unlink()
+                        self._unlinked = True
+                        logger.debug(f"Unlinked shared memory: {self.name}")
+                    except FileNotFoundError:
+                        self._unlinked = True  # Already unlinked
+                        logger.debug(f"Shared memory already unlinked: {self.name}")
+                    except Exception as e:
+                        logger.warning(f"Error unlinking shared memory: {e}")
 
-        finally:
-            # Remove from active managers
-            try:
-                SecureSharedMemoryManager._active_managers.remove(self)
-            except ValueError:
-                pass  # Already removed
+                # Step 5: Unregister from registry
+                try:
+                    self.registry.unregister(self.name)
+                except Exception as e:
+                    logger.warning(f"Error unregistering from registry: {e}")
+
+            finally:
+                # Remove from active managers
+                try:
+                    SecureSharedMemoryManager._active_managers.remove(self)
+                except ValueError:
+                    pass  # Already removed
 
     def close(self):
         """Explicitly close and cleanup."""
