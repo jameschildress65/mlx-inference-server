@@ -522,12 +522,14 @@ class WorkerManager:
             NoModelLoadedError: If no worker active
             WorkerCommunicationError: If worker communication fails
         """
-        # Get worker through abstraction (enables future multi-worker)
-        worker = self._get_worker_for_request(request.model)
-
-        # Track activity for idle monitoring
+        # DEADLOCK FIX: Track activity BEFORE getting worker to enforce consistent lock ordering
+        # Lock order: activity_lock → self.lock (matches unload_model_if_idle)
+        # Previous order (worker first, then increment) caused ABBA deadlock
         self._increment_active_requests()
         self._update_activity()
+
+        # Get worker through abstraction (enables future multi-worker)
+        worker = self._get_worker_for_request(request.model)
 
         try:
             # Send request
@@ -575,12 +577,14 @@ class WorkerManager:
             NoModelLoadedError: If no worker active
             WorkerCommunicationError: If worker communication fails
         """
-        # Get worker through abstraction (enables future multi-worker)
-        worker = self._get_worker_for_request(request.model)
-
-        # Track activity for idle monitoring
+        # DEADLOCK FIX: Track activity BEFORE getting worker to enforce consistent lock ordering
+        # Lock order: activity_lock → self.lock (matches unload_model_if_idle)
+        # Previous order (worker first, then increment) caused ABBA deadlock
         self._increment_active_requests()
         self._update_activity()
+
+        # Get worker through abstraction (enables future multi-worker)
+        worker = self._get_worker_for_request(request.model)
 
         try:
             # Send request
