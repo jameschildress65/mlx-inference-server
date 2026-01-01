@@ -12,6 +12,7 @@ Built to address limitations in existing MLX servers: lack of process isolation,
 
 ### Core Capabilities
 - **Process Isolation**: Worker processes separated from orchestrator for crash resilience
+- **NASA-Grade ProcessRegistry**: Crash-safe worker lifecycle management with automatic orphan cleanup
 - **Vision/Multimodal**: Support for vision-language models with dual-venv architecture
 - **POSIX Semaphores**: Cross-process synchronization with proper memory ordering
 - **Atomic Operations**: Crash-safe file operations using temp-file + rename pattern
@@ -34,16 +35,33 @@ Built to address limitations in existing MLX servers: lack of process isolation,
 
 ### Installation
 
+**⚠️ IMPORTANT: Use the automated installer - DO NOT create new install scripts!**
+
 **Requirements:**
 - Apple Silicon Mac (M1/M2/M3/M4)
 - Python 3.12+ (via pyenv recommended)
 - 16GB+ RAM (32GB+ recommended for 7B+ models)
 
+**Automated Installation (Recommended):**
 ```bash
 # Clone repository
 git clone https://github.com/jameschildress65/mlx-inference-server.git
 cd mlx-inference-server
 
+# Run automated installer (handles everything)
+bash install.sh
+```
+
+The installer automatically:
+- Checks prerequisites and system requirements
+- Sets up dual virtual environments (text + vision)
+- Installs all dependencies
+- Starts the server
+- Tests text and vision inference
+- **Tests NASA-grade ProcessRegistry** (crash-safe worker management)
+
+**Manual Installation (if needed):**
+```bash
 # Create virtual environment
 python3 -m venv venv
 source venv/bin/activate
