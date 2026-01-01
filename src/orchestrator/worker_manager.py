@@ -17,6 +17,7 @@ from ..ipc.shared_memory_bridge import (
     WorkerCommunicationError as ShmemWorkerError
 )
 from ..ipc.messages import CompletionRequest, PingMessage, ShutdownMessage
+from .process_registry import get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,10 @@ class WorkerManager:
         # PHASE 2: Shared memory IPC (Opus 4.5 optimization)
         self._shmem_bridge: Optional[SharedMemoryBridge] = None
         self._use_shmem: bool = config.use_shared_memory  # Can fall back to stdio if needed
+        self._current_shm_name: Optional[str] = None  # Track SHM name for registry
+
+        # PHASE 3: Process Registry (NASA-grade worker lifecycle management)
+        self._registry = get_registry()  # Singleton registry (triggers orphan cleanup on first init)
 
     # =========================================================================
     # Worker Abstraction Layer (Production-Ready for Future Multi-Worker)
@@ -390,6 +395,15 @@ class WorkerManager:
                     cwd=os.getcwd()  # Ensure correct working directory
                 )
                 self.logger.debug(f"Worker spawned with PID: {self.active_worker.pid}")
+
+                # PHASE 3: CRITICAL - Register worker IMMEDIATELY after spawn (crash safety)
+                # This ensures worker is tracked even if server crashes before ready signal
+                self._current_shm_name = shm_name if shm_name else "stdio"
+                self._registry.register_worker(
+                    pid=self.active_worker.pid,
+                    model_id=model_path,
+                    shm_name=self._current_shm_name
+                )
             except Exception as e:
                 # Clean up shared memory if worker spawn failed
                 if self._shmem_bridge:
@@ -515,6 +529,7 @@ class WorkerManager:
             self.logger.warning("Could not send shutdown signal (worker may be dead)")
 
         # Wait for graceful exit (up to 5 seconds)
+        worker_pid = self.active_worker.pid
         try:
             self.active_worker.wait(timeout=5)
             self.logger.info(f"Worker exited gracefully (returncode: {self.active_worker.returncode})")
@@ -522,10 +537,14 @@ class WorkerManager:
             self.logger.warning("Worker did not exit gracefully, sending SIGKILL")
             self._kill_worker()
 
+        # PHASE 3: Unregister worker from process registry
+        self._registry.unregister_worker(worker_pid)
+
         # Clear state
         self.active_worker = None
         self.active_model_name = None
         self.active_memory_gb = 0.0
+        self._current_shm_name = None
 
         self.logger.info(f"Worker terminated, memory freed: {memory_gb:.2f} GB")
 
@@ -731,13 +750,16 @@ class WorkerManager:
             return {"healthy": False, "status": "communication_error"}
 
     def _kill_worker(self) -> None:
-        """Force-kill worker process (SIGKILL)."""
+        """Force-kill worker process (SIGKILL) - NASA-grade with registry."""
         if self.active_worker is not None:
-            self.logger.info("Force-killing worker process")
-            self.active_worker.kill()
-            self.active_worker.wait()
+            worker_pid = self.active_worker.pid
+            self.logger.info(f"Force-killing worker process (PID: {worker_pid})")
 
-            # PHASE 2: Clean up shared memory
+            # PHASE 3: Use ProcessRegistry for clean termination (handles SHM cleanup)
+            # This guarantees worker is killed even if server crashes mid-operation
+            self._registry.terminate_worker(worker_pid, timeout=2.0)
+
+            # PHASE 2: Clean up shared memory bridge
             if self._shmem_bridge:
                 try:
                     self._shmem_bridge.close()
@@ -750,6 +772,11 @@ class WorkerManager:
     def _cleanup_dead_worker(self) -> None:
         """Clean up state after worker died unexpectedly."""
         self.logger.warning("Cleaning up dead worker")
+
+        # PHASE 3: Unregister from ProcessRegistry
+        if self.active_worker is not None:
+            worker_pid = self.active_worker.pid
+            self._registry.unregister_worker(worker_pid)
 
         # PHASE 2: Clean up shared memory
         if self._shmem_bridge:
@@ -764,6 +791,7 @@ class WorkerManager:
         self.active_worker = None
         self.active_model_name = None
         self.active_memory_gb = 0.0
+        self._current_shm_name = None
 
     def get_status(self) -> Dict[str, Any]:
         """

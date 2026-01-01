@@ -97,6 +97,16 @@ def main():
     logger.info("=" * 70)
     logger.info("MLX Inference Server - Process Isolation Architecture")
     logger.info("=" * 70)
+
+    # ============================================================
+    # CRITICAL: Initialize registry FIRST (kills orphaned workers)
+    # ============================================================
+    # NASA-grade worker lifecycle management: This MUST happen before
+    # any worker creation to ensure orphans from crashed servers are cleaned up.
+    from src.orchestrator.process_registry import get_registry
+    logger.info("Initializing ProcessRegistry (orphan cleanup)...")
+    registry = get_registry()  # This triggers orphan cleanup on first call
+    logger.info("ProcessRegistry ready - orphaned workers cleaned up")
     logger.info(f"Version: 1.0.0")
     logger.info(f"Machine: {config.machine_type}")
     logger.info(f"Total RAM: {config.total_ram_gb} GB")
