@@ -84,7 +84,30 @@ class UnloadResult:
 
 
 class WorkerManager:
-    """Manages model worker subprocess lifecycle."""
+    """Manages model worker subprocess lifecycle.
+
+    CRITICAL: LOCK ORDERING RULES (Opus 4.5 - Must Follow to Prevent Deadlock)
+    =========================================================================
+    This class uses TWO locks for thread safety:
+        1. activity_lock - protects activity tracking (requests, timestamps)
+        2. self.lock - protects worker lifecycle (spawn, kill, IPC)
+
+    LOCK ACQUISITION ORDER (ALWAYS follow this order):
+        activity_lock → self.lock
+
+    NEVER acquire self.lock then activity_lock (causes ABBA deadlock).
+
+    Examples of correct ordering:
+        - generate():          activity_lock → self.lock ✓
+        - generate_stream():   activity_lock → self.lock ✓
+        - unload_model_if_idle(): activity_lock → self.lock ✓
+
+    If you need both locks, ALWAYS acquire activity_lock first.
+    If you only need one lock, acquire only that lock.
+
+    See: docs/BUG-DEADLOCK-LOCK-ORDERING.md for detailed analysis.
+    =========================================================================
+    """
 
     def __init__(self, config):
         """
@@ -521,6 +544,9 @@ class WorkerManager:
         health checks), but that's acceptable given single-worker design. Prevents
         worker lifecycle races during request processing.
 
+        Opus Optimization: Enforces request timeout from config to prevent runaway
+        requests from holding the lock indefinitely.
+
         Args:
             request: CompletionRequest message
 
@@ -530,6 +556,7 @@ class WorkerManager:
         Raises:
             NoModelLoadedError: If no worker active
             WorkerCommunicationError: If worker communication fails
+            WorkerTimeoutError: If request exceeds configured timeout
         """
         # DEADLOCK FIX: Track activity BEFORE acquiring main lock
         # Lock order: activity_lock → self.lock (matches unload_model_if_idle)
@@ -563,9 +590,10 @@ class WorkerManager:
                 # This prevents worker from being unloaded/replaced mid-request
                 self._send_message(request)
 
-                # Receive response (longer timeout for generation - can take time with large models)
-                # 300s timeout for 72B+ models generating long responses
-                response = self._receive_message(timeout=300)
+                # Opus Optimization: Use configured request timeout (safety net)
+                # Prevents runaway requests from holding lock indefinitely
+                timeout = self.config.request_timeout_seconds
+                response = self._receive_message(timeout=timeout)
 
                 if response.type == "error":
                     raise WorkerError(f"Worker error: {response.message}")
@@ -595,6 +623,9 @@ class WorkerManager:
         health checks), but that's acceptable given single-worker design. Prevents
         worker lifecycle races during request processing.
 
+        Opus Optimization: Uses configured request timeout for first chunk, then
+        adaptive timeout for subsequent chunks. Prevents runaway streams.
+
         Yields chunks as they arrive from worker.
 
         Args:
@@ -606,6 +637,7 @@ class WorkerManager:
         Raises:
             NoModelLoadedError: If no worker active
             WorkerCommunicationError: If worker communication fails
+            WorkerTimeoutError: If stream exceeds configured timeout
         """
         # DEADLOCK FIX: Track activity BEFORE acquiring main lock
         # Lock order: activity_lock → self.lock (matches unload_model_if_idle)
@@ -639,12 +671,18 @@ class WorkerManager:
                 self._send_message(request)
 
                 # Receive chunks as worker generates them
-                # Use adaptive timeout: longer for first chunk (model init), shorter for subsequent
+                # Opus Optimization: Use adaptive timeout with config-based ceiling
+                # First chunk: Uses configured request_timeout (safety net)
+                # Subsequent chunks: 30s timeout (should be fast once streaming)
                 first_chunk = True
                 while True:
-                    # First chunk: 300s timeout (model may need to initialize)
-                    # Subsequent chunks: 30s timeout (should be fast once streaming)
-                    timeout = 300 if first_chunk else 30
+                    if first_chunk:
+                        # Use configured timeout for first chunk (may need model init)
+                        timeout = self.config.request_timeout_seconds
+                    else:
+                        # Subsequent chunks should be fast
+                        timeout = 30
+
                     chunk = self._receive_message(timeout=timeout)
 
                     if chunk.type == "error":
@@ -759,6 +797,82 @@ class WorkerManager:
                 "model_name": self.active_model_name,
                 "memory_gb": self.active_memory_gb
             }
+
+    def get_status_fast(self, timeout: float = 0.1) -> Dict[str, Any]:
+        """
+        Get worker status with fast path (non-blocking).
+
+        Opus Optimization: Uses trylock with short timeout to avoid blocking
+        during long-running generation requests. If lock cannot be acquired
+        quickly, returns "busy" status instead of blocking indefinitely.
+
+        This method is suitable for monitoring dashboards and health checks
+        where slightly stale data is acceptable. For guaranteed accurate status,
+        use get_status() instead (may block up to 300s during generation).
+
+        Args:
+            timeout: Max seconds to wait for lock (default: 0.1 = 100ms)
+
+        Returns:
+            Status dict. If lock acquired: accurate status.
+            If lock busy: {"status": "busy", "model_loaded": True, ...}
+        """
+        # Try to acquire lock with timeout
+        acquired = self.lock.acquire(timeout=timeout)
+
+        if not acquired:
+            # Lock not available - generation in progress
+            # Return best-effort status without blocking
+            with self.activity_lock:
+                has_active = self.active_requests > 0
+                idle_time = time.time() - self.last_activity_time
+
+            return {
+                "model_loaded": True,  # Assume yes if we can't check
+                "model_name": self.active_model_name,  # May be stale
+                "memory_gb": self.active_memory_gb,    # May be stale
+                "status": "busy",
+                "generation_in_progress": has_active,
+                "idle_seconds": idle_time,
+                "note": f"Status check timed out after {timeout}s (generation in progress)"
+            }
+
+        # Got lock - return accurate status
+        try:
+            if self.active_worker is None:
+                return {
+                    "model_loaded": False,
+                    "model_name": None,
+                    "memory_gb": 0.0,
+                    "status": "no_model"
+                }
+
+            # Check if worker is actually alive
+            if self.active_worker.poll() is not None:
+                self.logger.warning(f"Worker process died unexpectedly (returncode: {self.active_worker.returncode})")
+                self._cleanup_dead_worker()
+                return {
+                    "model_loaded": False,
+                    "model_name": None,
+                    "memory_gb": 0.0,
+                    "status": "worker_dead"
+                }
+
+            # Get activity info
+            with self.activity_lock:
+                has_active = self.active_requests > 0
+                idle_time = time.time() - self.last_activity_time
+
+            return {
+                "model_loaded": True,
+                "model_name": self.active_model_name,
+                "memory_gb": self.active_memory_gb,
+                "status": "ready" if not has_active else "processing",
+                "generation_in_progress": has_active,
+                "idle_seconds": idle_time
+            }
+        finally:
+            self.lock.release()
 
     def get_idle_time(self) -> float:
         """
