@@ -512,6 +512,15 @@ class WorkerManager:
         """
         Forward completion request to worker via IPC.
 
+        Opus Fix C1: Hold lock during entire request to prevent TOCTOU race.
+        Previous code released lock after getting worker reference, allowing worker
+        to die or be replaced before message was sent. Now we hold the lock for the
+        entire operation (send + receive) to guarantee worker stability.
+
+        Trade-off: This serializes all operations during generation (status checks,
+        health checks), but that's acceptable given single-worker design. Prevents
+        worker lifecycle races during request processing.
+
         Args:
             request: CompletionRequest message
 
@@ -522,41 +531,53 @@ class WorkerManager:
             NoModelLoadedError: If no worker active
             WorkerCommunicationError: If worker communication fails
         """
-        # DEADLOCK FIX: Track activity BEFORE getting worker to enforce consistent lock ordering
+        # DEADLOCK FIX: Track activity BEFORE acquiring main lock
         # Lock order: activity_lock → self.lock (matches unload_model_if_idle)
-        # Previous order (worker first, then increment) caused ABBA deadlock
         self._increment_active_requests()
         self._update_activity()
 
-        # Get worker through abstraction (enables future multi-worker)
-        worker = self._get_worker_for_request(request.model)
-
         try:
-            # Send request
-            self._send_message(request)
-
-            # Receive response (longer timeout for generation - can take time with large models)
-            # 300s timeout for 72B+ models generating long responses
-            response = self._receive_message(timeout=300)
-
-            if response.type == "error":
-                raise WorkerError(f"Worker error: {response.message}")
-
-            if response.type != "completion_response":
-                raise WorkerError(f"Expected 'completion_response', got '{response.type}'")
-
-            return {
-                "text": response.text,
-                "tokens": response.tokens,
-                "finish_reason": response.finish_reason
-            }
-        except BrokenPipeError as e:
-            # Opus 4.5 High Priority Fix H4: Handle race condition where worker dies
-            # between health check and message send (TOCTOU race)
-            self.logger.error(f"Worker died during generation: {e}")
+            # Opus C1 Fix: Hold lock for entire operation to prevent worker lifecycle changes
             with self.lock:
-                self._cleanup_dead_worker()
-            raise WorkerError("Worker process died during generation. Reload model required.")
+                # Check worker availability
+                if self.active_worker is None:
+                    raise NoModelLoadedError(
+                        f"No worker available for model: {request.model}. "
+                        f"Load model first via /v1/chat/completions or admin API."
+                    )
+
+                # Health check: Verify worker is alive
+                if self.active_worker.poll() is not None:
+                    returncode = self.active_worker.returncode
+                    self.logger.error(
+                        f"Worker process died (returncode: {returncode}). "
+                        f"Model: {self.active_model_name}"
+                    )
+                    self._cleanup_dead_worker()
+                    raise WorkerError(
+                        f"Worker process died (exit code: {returncode}). "
+                        f"Reload model required."
+                    )
+
+                # Send request and receive response while holding lock
+                # This prevents worker from being unloaded/replaced mid-request
+                self._send_message(request)
+
+                # Receive response (longer timeout for generation - can take time with large models)
+                # 300s timeout for 72B+ models generating long responses
+                response = self._receive_message(timeout=300)
+
+                if response.type == "error":
+                    raise WorkerError(f"Worker error: {response.message}")
+
+                if response.type != "completion_response":
+                    raise WorkerError(f"Expected 'completion_response', got '{response.type}'")
+
+                return {
+                    "text": response.text,
+                    "tokens": response.tokens,
+                    "finish_reason": response.finish_reason
+                }
         finally:
             # Always decrement active requests (even on error)
             self._decrement_active_requests()
@@ -564,6 +585,15 @@ class WorkerManager:
     def generate_stream(self, request: CompletionRequest):
         """
         Forward streaming completion request to worker via IPC.
+
+        Opus Fix C1: Hold lock during entire streaming request to prevent TOCTOU race.
+        Previous code released lock after getting worker reference, allowing worker
+        to die or be replaced before/during streaming. Now we hold the lock for the
+        entire operation to guarantee worker stability.
+
+        Trade-off: This serializes all operations during streaming (status checks,
+        health checks), but that's acceptable given single-worker design. Prevents
+        worker lifecycle races during request processing.
 
         Yields chunks as they arrive from worker.
 
@@ -577,45 +607,56 @@ class WorkerManager:
             NoModelLoadedError: If no worker active
             WorkerCommunicationError: If worker communication fails
         """
-        # DEADLOCK FIX: Track activity BEFORE getting worker to enforce consistent lock ordering
+        # DEADLOCK FIX: Track activity BEFORE acquiring main lock
         # Lock order: activity_lock → self.lock (matches unload_model_if_idle)
-        # Previous order (worker first, then increment) caused ABBA deadlock
         self._increment_active_requests()
         self._update_activity()
 
-        # Get worker through abstraction (enables future multi-worker)
-        worker = self._get_worker_for_request(request.model)
-
         try:
-            # Send request
-            self._send_message(request)
-
-            # Receive chunks as worker generates them
-            # Use adaptive timeout: longer for first chunk (model init), shorter for subsequent
-            first_chunk = True
-            while True:
-                # First chunk: 300s timeout (model may need to initialize)
-                # Subsequent chunks: 30s timeout (should be fast once streaming)
-                timeout = 300 if first_chunk else 30
-                chunk = self._receive_message(timeout=timeout)
-
-                if chunk.type == "error":
-                    raise WorkerError(f"Worker error: {chunk.message}")
-
-                if chunk.type == "stream_chunk":
-                    yield chunk
-                    first_chunk = False  # After first chunk, use shorter timeout
-                    if chunk.done:
-                        break
-                else:
-                    raise WorkerError(f"Expected 'stream_chunk', got '{chunk.type}'")
-        except BrokenPipeError as e:
-            # Opus 4.5 High Priority Fix H4: Handle race condition where worker dies
-            # between health check and message send (TOCTOU race)
-            self.logger.error(f"Worker died during streaming generation: {e}")
+            # Opus C1 Fix: Hold lock for entire operation to prevent worker lifecycle changes
             with self.lock:
-                self._cleanup_dead_worker()
-            raise WorkerError("Worker process died during streaming. Reload model required.")
+                # Check worker availability
+                if self.active_worker is None:
+                    raise NoModelLoadedError(
+                        f"No worker available for model: {request.model}. "
+                        f"Load model first via /v1/chat/completions or admin API."
+                    )
+
+                # Health check: Verify worker is alive
+                if self.active_worker.poll() is not None:
+                    returncode = self.active_worker.returncode
+                    self.logger.error(
+                        f"Worker process died (returncode: {returncode}). "
+                        f"Model: {self.active_model_name}"
+                    )
+                    self._cleanup_dead_worker()
+                    raise WorkerError(
+                        f"Worker process died (exit code: {returncode}). "
+                        f"Reload model required."
+                    )
+
+                # Send request
+                self._send_message(request)
+
+                # Receive chunks as worker generates them
+                # Use adaptive timeout: longer for first chunk (model init), shorter for subsequent
+                first_chunk = True
+                while True:
+                    # First chunk: 300s timeout (model may need to initialize)
+                    # Subsequent chunks: 30s timeout (should be fast once streaming)
+                    timeout = 300 if first_chunk else 30
+                    chunk = self._receive_message(timeout=timeout)
+
+                    if chunk.type == "error":
+                        raise WorkerError(f"Worker error: {chunk.message}")
+
+                    if chunk.type == "stream_chunk":
+                        yield chunk
+                        first_chunk = False  # After first chunk, use shorter timeout
+                        if chunk.done:
+                            break
+                    else:
+                        raise WorkerError(f"Expected 'stream_chunk', got '{chunk.type}'")
         finally:
             # Always decrement active requests (even on error)
             self._decrement_active_requests()
@@ -687,30 +728,37 @@ class WorkerManager:
         self.active_memory_gb = 0.0
 
     def get_status(self) -> Dict[str, Any]:
-        """Get current worker status."""
-        if self.active_worker is None:
-            return {
-                "model_loaded": False,
-                "model_name": None,
-                "memory_gb": 0.0
-            }
+        """
+        Get current worker status.
 
-        # Check if worker is actually alive
-        if self.active_worker.poll() is not None:
-            # Worker died - cleanup state
-            self.logger.warning(f"Worker process died unexpectedly in get_status() (returncode: {self.active_worker.returncode})")
-            self._cleanup_dead_worker()
-            return {
-                "model_loaded": False,
-                "model_name": None,
-                "memory_gb": 0.0
-            }
+        Opus Fix C2: Added lock protection to prevent race conditions.
+        Previous code read active_worker without lock, which could cause
+        crashes if another thread modified it concurrently.
+        """
+        with self.lock:
+            if self.active_worker is None:
+                return {
+                    "model_loaded": False,
+                    "model_name": None,
+                    "memory_gb": 0.0
+                }
 
-        return {
-            "model_loaded": True,
-            "model_name": self.active_model_name,
-            "memory_gb": self.active_memory_gb
-        }
+            # Check if worker is actually alive
+            if self.active_worker.poll() is not None:
+                # Worker died - cleanup state
+                self.logger.warning(f"Worker process died unexpectedly in get_status() (returncode: {self.active_worker.returncode})")
+                self._cleanup_dead_worker()
+                return {
+                    "model_loaded": False,
+                    "model_name": None,
+                    "memory_gb": 0.0
+                }
+
+            return {
+                "model_loaded": True,
+                "model_name": self.active_model_name,
+                "memory_gb": self.active_memory_gb
+            }
 
     def get_idle_time(self) -> float:
         """

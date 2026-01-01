@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 # Configuration (from plan)
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB per image
 MAX_TOTAL_IMAGES = 5  # Max images per request
+MAX_IMAGE_DIMENSIONS = (4096, 4096)  # Max width/height (Opus C3 fix - prevents image bombs)
 URL_TIMEOUT_SECONDS = 10.0  # HTTP download timeout
 INLINE_THRESHOLD = 500 * 1024  # 500KB threshold for inline vs shmem
 
@@ -319,6 +320,9 @@ def validate_image(data: bytes) -> bool:
     """
     Validate image data using PIL/Pillow.
 
+    Opus Fix C3: Added dimension limits to prevent image bomb attacks.
+    Large dimensions can cause excessive memory usage during decompression.
+
     Args:
         data: Image bytes
 
@@ -327,6 +331,7 @@ def validate_image(data: bytes) -> bool:
 
     Raises:
         InvalidImageError: If image is corrupted or unsupported format
+        ImageTooLargeError: If image dimensions exceed limits
         ImportError: If Pillow not installed (vision models require it)
     """
     try:
@@ -343,9 +348,22 @@ def validate_image(data: bytes) -> bool:
         img = Image.open(io.BytesIO(data))
         img.verify()  # Checks for corruption
 
+        # Re-open to get dimensions (verify() invalidates the Image object)
+        img = Image.open(io.BytesIO(data))
+        width, height = img.size
+
+        # Opus C3: Enforce dimension limits (prevents decompression bombs)
+        if width > MAX_IMAGE_DIMENSIONS[0] or height > MAX_IMAGE_DIMENSIONS[1]:
+            raise ImageTooLargeError(
+                f"Image dimensions too large: {width}x{height} "
+                f"(max: {MAX_IMAGE_DIMENSIONS[0]}x{MAX_IMAGE_DIMENSIONS[1]})"
+            )
+
         logger.debug(f"Valid image: {img.format} {img.size} {img.mode}")
         return True
 
+    except ImageTooLargeError:
+        raise  # Re-raise our custom error
     except Exception as e:
         raise InvalidImageError(f"Invalid or corrupted image: {e}")
 
