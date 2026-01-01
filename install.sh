@@ -349,9 +349,82 @@ fi
 
 echo ""
 
+# Test ProcessRegistry (NASA-Grade)
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${YELLOW}Step 9: Testing NASA-Grade ProcessRegistry${NC}"
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+# Test 1: Registry initialization
+echo "  → Checking ProcessRegistry initialization..."
+if grep -q "ProcessRegistry initialized" logs/mlx-inference-server.log; then
+    echo -e "${GREEN}  ✓ ProcessRegistry initialized${NC}"
+else
+    echo -e "${RED}  ✗ ProcessRegistry not initialized${NC}"
+    exit 1
+fi
+
+# Test 2: Worker registration
+echo "  → Testing worker registration..."
+curl -s -X POST "http://localhost:11441/admin/load?model_path=mlx-community/Qwen2.5-7B-Instruct-4bit" > /dev/null
+sleep 5
+
+if [ -f "/tmp/mlx-server/worker_registry.json" ]; then
+    WORKER_COUNT=$(cat /tmp/mlx-server/worker_registry.json | python3 -c "import sys, json; print(len(json.load(sys.stdin).get('workers', {})))" 2>/dev/null || echo "0")
+    if [ "$WORKER_COUNT" == "1" ]; then
+        WORKER_PID=$(cat /tmp/mlx-server/worker_registry.json | python3 -c "import sys, json; w=json.load(sys.stdin).get('workers', {}); print(list(w.keys())[0] if w else '')" 2>/dev/null)
+        echo -e "${GREEN}  ✓ Worker registered (PID: $WORKER_PID)${NC}"
+    else
+        echo -e "${RED}  ✗ Worker registration failed${NC}"
+        exit 1
+    fi
+else
+    echo -e "${RED}  ✗ Registry file not found${NC}"
+    exit 1
+fi
+
+# Test 3: Orphan cleanup (critical test)
+echo "  → Testing orphan cleanup (simulated crash)..."
+SERVER_PID=$(cat /tmp/mlx-inference-server.pid 2>/dev/null)
+WORKER_PID_BEFORE=$(cat /tmp/mlx-server/worker_registry.json | python3 -c "import sys, json; w=json.load(sys.stdin).get('workers', {}); print(list(w.keys())[0] if w else '')" 2>/dev/null)
+
+# Simulate crash
+kill -9 $SERVER_PID 2>/dev/null || true
+sleep 2
+
+# Restart
+./bin/mlx-inference-server-daemon.sh start > /dev/null 2>&1
+sleep 5
+
+# Check if orphan was detected and cleaned
+if grep -q "Found 1 orphaned workers" logs/mlx-inference-server.log 2>/dev/null; then
+    if ! ps -p $WORKER_PID_BEFORE > /dev/null 2>&1; then
+        echo -e "${GREEN}  ✓ Orphan cleanup working (killed worker $WORKER_PID_BEFORE)${NC}"
+    else
+        echo -e "${YELLOW}  ⚠ Orphan detected but not killed${NC}"
+    fi
+else
+    if ! ps -p $WORKER_PID_BEFORE > /dev/null 2>&1; then
+        echo -e "${GREEN}  ✓ Worker cleaned up (exited gracefully)${NC}"
+    else
+        echo -e "${RED}  ✗ Orphan cleanup failed - worker $WORKER_PID_BEFORE still running${NC}"
+        exit 1
+    fi
+fi
+
+# Verify registry is clean
+FINAL_WORKER_COUNT=$(cat /tmp/mlx-server/worker_registry.json | python3 -c "import sys, json; print(len(json.load(sys.stdin).get('workers', {})))" 2>/dev/null || echo "0")
+if [ "$FINAL_WORKER_COUNT" == "0" ]; then
+    echo -e "${GREEN}  ✓ Registry clean after restart${NC}"
+else
+    echo -e "${RED}  ✗ Registry not clean (contains $FINAL_WORKER_COUNT workers)${NC}"
+    exit 1
+fi
+
+echo ""
+
 # Success summary
 echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║              Installation Successful! ✓                    ║${NC}"
+echo -e "${GREEN}║       Installation Successful! (NASA-Grade) ✓             ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${CYAN}Installation Summary:${NC}"
