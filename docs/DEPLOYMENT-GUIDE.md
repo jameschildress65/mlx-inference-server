@@ -1,6 +1,6 @@
 # MLX Server V3 - Deployment Guide
 
-**Version**: 3.0.0-alpha
+**Version**: 3.0.0
 **Date**: 2025-12-24
 **Target**: Production deployment on Apple Silicon
 
@@ -69,12 +69,14 @@ python --version  # Should show 3.12.0
 ### 2. Clone Repository
 
 ```bash
-cd ~/Documents/projects/utilities
-git clone https://github.com/jameschildress65/utilities.git
-cd mlx-server
+cd ~/projects
+git clone https://github.com/jameschildress65/mlx-inference-server.git
+cd mlx-inference-server
+```
 
-# Checkout V3 branch
-git checkout v3-process-isolation
+**Note:** Use automated installer instead (recommended):
+```bash
+bash install.sh
 ```
 
 ### 3. Create Virtual Environment
