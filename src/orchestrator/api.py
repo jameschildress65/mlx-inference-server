@@ -311,7 +311,20 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
             tokenizer = get_tokenizer(request.model)
 
             # Convert messages to dicts for apply_chat_template
-            messages_dict = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+            # Handle multimodal content (list of blocks) by extracting text only
+            messages_dict = []
+            for msg in request.messages:
+                if isinstance(msg.content, list):
+                    # Multimodal: extract text blocks only (skip images for prompt)
+                    text_parts = [
+                        block.text for block in msg.content
+                        if hasattr(block, 'type') and block.type == 'text'
+                    ]
+                    content_str = " ".join(text_parts)
+                else:
+                    # Text-only (backward compatible)
+                    content_str = msg.content
+                messages_dict.append({"role": msg.role, "content": content_str})
 
             # Apply chat template (tokenize=False returns string, not tokens)
             prompt = tokenizer.apply_chat_template(
