@@ -17,8 +17,8 @@
 ### Server Status
 ```bash
 # Current running server
-PID: 95857
-CWD: ~/Documents/projects/utilities/mlx-inference-server
+PID: <varies>
+CWD: ~/projects/mlx-inference-server
 Main API: http://localhost:11440
 Admin API: http://localhost:11441
 Status: ✅ Healthy

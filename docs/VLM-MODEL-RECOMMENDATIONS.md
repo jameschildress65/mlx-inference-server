@@ -130,7 +130,7 @@ Normally smaller models are faster, but MLX/Metal GPU optimization changes this:
 
 **Installation:**
 ```bash
-cd ~/Documents/projects/utilities/mlx-inference-server
+cd ~/projects/mlx-inference-server
 
 # Create vision venv (if not exists)
 python3 -m venv venv-vision
@@ -295,7 +295,7 @@ venv-vision/bin/huggingface-cli download mlx-community/Qwen2.5-VL-7B-Instruct-4b
 
 **Step 1: Install venv-vision**
 ```bash
-cd ~/Documents/projects/utilities/mlx-inference-server
+cd ~/projects/mlx-inference-server
 python3 -m venv venv-vision
 venv-vision/bin/pip install mlx-vlm pillow "transformers>=4.44.0,<5.0"
 venv-vision/bin/pip install setproctitle pyyaml posix-ipc psutil
