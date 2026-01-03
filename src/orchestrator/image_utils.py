@@ -26,7 +26,7 @@ MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB per image
 MAX_TOTAL_IMAGES = 5  # Max images per request
 MAX_IMAGE_DIMENSIONS = (4096, 4096)  # Max width/height (Opus C3 fix - prevents image bombs)
 URL_TIMEOUT_SECONDS = 10.0  # HTTP download timeout
-INLINE_THRESHOLD = 500 * 1024  # 500KB threshold for inline vs shmem
+INLINE_THRESHOLD = 10 * 1024 * 1024  # 10MB threshold - inline all images (no shmem needed for typical use)
 
 # SSRF Protection: Blocked IP ranges (Opus 4.5 recommendation)
 BLOCKED_IP_RANGES = [

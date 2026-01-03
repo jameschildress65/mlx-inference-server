@@ -141,6 +141,20 @@ class WorkerManager:
         self._registry = get_registry()  # Singleton registry (triggers orphan cleanup on first init)
 
     # =========================================================================
+    # Public Properties
+    # =========================================================================
+
+    @property
+    def bridge(self) -> Optional['SharedMemoryBridge']:
+        """
+        Public access to shared memory bridge for image processing.
+
+        Returns None if no worker active or shared memory not in use.
+        Used by API layer to pass large images via shared memory.
+        """
+        return self._shmem_bridge
+
+    # =========================================================================
     # Worker Abstraction Layer (Production-Ready for Future Multi-Worker)
     # =========================================================================
     # These methods provide a clean abstraction for worker access, enabling
