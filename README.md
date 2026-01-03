@@ -12,7 +12,7 @@ Built to address limitations in existing MLX servers: lack of process isolation,
 
 ### Core Capabilities
 - **Process Isolation**: Worker processes separated from orchestrator for crash resilience
-- **NASA-Grade ProcessRegistry**: Crash-safe worker lifecycle management with automatic orphan cleanup
+- **robust ProcessRegistry**: Crash-safe worker lifecycle management with automatic orphan cleanup
 - **Vision/Multimodal**: Support for vision-language models with dual-venv architecture
 - **POSIX Semaphores**: Cross-process synchronization with proper memory ordering
 - **Atomic Operations**: Crash-safe file operations using temp-file + rename pattern
@@ -58,7 +58,7 @@ The installer automatically:
 - Installs all dependencies
 - Starts the server
 - Tests text and vision inference
-- **Tests NASA-grade ProcessRegistry** (crash-safe worker management)
+- **Tests robust ProcessRegistry** (crash-safe worker management)
 
 **Manual Installation (if needed):**
 ```bash

@@ -349,9 +349,9 @@ fi
 
 echo ""
 
-# Test ProcessRegistry (NASA-Grade)
+# Test ProcessRegistry (robust)
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Step 9: Testing NASA-Grade ProcessRegistry${NC}"
+echo -e "${YELLOW}Step 9: Testing robust ProcessRegistry${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 # Test 1: Registry initialization
@@ -424,7 +424,7 @@ echo ""
 
 # Success summary
 echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║       Installation Successful! (NASA-Grade) ✓             ║${NC}"
+echo -e "${GREEN}║       Installation Successful! (robust) ✓             ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${CYAN}Installation Summary:${NC}"

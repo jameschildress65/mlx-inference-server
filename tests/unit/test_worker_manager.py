@@ -129,7 +129,7 @@ class TestWorkerManager:
 
 class TestWorkerAbstractionLayer:
     """
-    NASA-Grade Unit Tests for Worker Abstraction Layer.
+    robust Unit Tests for Worker Abstraction Layer.
     
     Tests the _get_worker_for_request() abstraction that enables
     future multi-worker support without API changes.

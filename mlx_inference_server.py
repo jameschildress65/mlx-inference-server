@@ -101,7 +101,7 @@ def main():
     # ============================================================
     # CRITICAL: Initialize registry FIRST (kills orphaned workers)
     # ============================================================
-    # NASA-grade worker lifecycle management: This MUST happen before
+    # robust worker lifecycle management: This MUST happen before
     # any worker creation to ensure orphans from crashed servers are cleaned up.
     from src.orchestrator.process_registry import get_registry
     logger.info("Initializing ProcessRegistry (orphan cleanup)...")

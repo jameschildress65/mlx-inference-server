@@ -137,7 +137,7 @@ class WorkerManager:
         self._use_shmem: bool = config.use_shared_memory  # Can fall back to stdio if needed
         self._current_shm_name: Optional[str] = None  # Track SHM name for registry
 
-        # PHASE 3: Process Registry (NASA-grade worker lifecycle management)
+        # PHASE 3: Process Registry (robust worker lifecycle management)
         self._registry = get_registry()  # Singleton registry (triggers orphan cleanup on first init)
 
     # =========================================================================
@@ -750,7 +750,7 @@ class WorkerManager:
             return {"healthy": False, "status": "communication_error"}
 
     def _kill_worker(self) -> None:
-        """Force-kill worker process (SIGKILL) - NASA-grade with registry."""
+        """Force-kill worker process (SIGKILL) - robust with registry."""
         if self.active_worker is not None:
             worker_pid = self.active_worker.pid
             self.logger.info(f"Force-killing worker process (PID: {worker_pid})")
