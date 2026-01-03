@@ -7,6 +7,8 @@ Handles:
 - Image validation with PIL
 - Size limit enforcement
 - SSRF protection (blocking private IPs)
+- Automatic resizing based on available RAM (v3.1.0)
+- Resize caching with TTL (v3.1.0)
 """
 
 import base64
@@ -14,6 +16,8 @@ import re
 import logging
 import socket
 import ipaddress
+import os
+import subprocess
 from typing import Optional, Tuple
 from pathlib import Path
 from urllib.parse import urlparse
@@ -27,6 +31,25 @@ MAX_TOTAL_IMAGES = 5  # Max images per request
 MAX_IMAGE_DIMENSIONS = (4096, 4096)  # Max width/height (Opus C3 fix - prevents image bombs)
 URL_TIMEOUT_SECONDS = 10.0  # HTTP download timeout
 INLINE_THRESHOLD = 10 * 1024 * 1024  # 10MB threshold - inline all images (no shmem needed for typical use)
+
+# Auto-Resize Configuration (v3.1.0)
+# RAM-based limits determined by testing (see docs/sessions/VISION-MEMORY-INVESTIGATION.md)
+RAM_TIER_LIMITS = {
+    128: {"default": 1024, "description": "128+ GB systems"},
+    64:  {"default": 1024, "description": "64 GB systems"},
+    32:  {"default": 768,  "description": "32 GB systems (MacBook Air)"},
+    16:  {"default": 512,  "description": "16 GB systems (M4 Mini)"},
+    8:   {"default": 512,  "description": "8 GB systems (not recommended)"},
+}
+
+# Resize cache configuration
+RESIZE_CACHE_ENABLED = os.getenv("VISION_RESIZE_CACHE_ENABLED", "true").lower() == "true"
+RESIZE_CACHE_SIZE = int(os.getenv("VISION_RESIZE_CACHE_SIZE", "20"))
+RESIZE_CACHE_TTL = int(os.getenv("VISION_RESIZE_CACHE_TTL", "3600"))  # 1 hour
+
+# Auto-resize configuration
+AUTO_RESIZE_ENABLED = os.getenv("VISION_AUTO_RESIZE", "true").lower() == "true"
+VISION_MAX_DIMENSION = None  # Will be set by detect_system_limits()
 
 # SSRF Protection: Blocked IP ranges (Opus 4.5 recommendation)
 BLOCKED_IP_RANGES = [
@@ -59,6 +82,170 @@ class ImageDownloadError(ImageProcessingError):
 class InvalidImageError(ImageProcessingError):
     """Image data is invalid or corrupted."""
     pass
+
+
+# ============================================================================
+# RAM Detection and Auto-Resize (v3.1.0)
+# ============================================================================
+
+def get_system_ram_gb() -> float:
+    """Detect total system RAM in GB.
+
+    Returns:
+        Total RAM in GB
+
+    Raises:
+        RuntimeError: If RAM detection fails
+    """
+    try:
+        # macOS
+        result = subprocess.run(
+            ['sysctl', '-n', 'hw.memsize'],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        ram_bytes = int(result.stdout.strip())
+        ram_gb = ram_bytes / (1024 ** 3)
+        return ram_gb
+    except Exception as e:
+        logger.warning(f"Failed to detect RAM: {e}, assuming 16 GB")
+        return 16.0  # Conservative default
+
+
+def detect_system_limits() -> int:
+    """Detect safe vision dimension limit based on system RAM.
+
+    Returns:
+        Maximum safe dimension in pixels
+    """
+    global VISION_MAX_DIMENSION
+
+    # Check for manual override
+    env_override = os.getenv("VISION_MAX_DIMENSION")
+    if env_override:
+        VISION_MAX_DIMENSION = int(env_override)
+        logger.info(
+            f"Vision max dimension: {VISION_MAX_DIMENSION}px "
+            f"(manual override from VISION_MAX_DIMENSION)"
+        )
+        return VISION_MAX_DIMENSION
+
+    # Auto-detect based on RAM
+    system_ram_gb = get_system_ram_gb()
+
+    # Find appropriate tier
+    for ram_threshold in sorted(RAM_TIER_LIMITS.keys(), reverse=True):
+        if system_ram_gb >= ram_threshold:
+            limits = RAM_TIER_LIMITS[ram_threshold]
+            VISION_MAX_DIMENSION = limits["default"]
+            logger.info(
+                f"System RAM: {system_ram_gb:.1f} GB detected "
+                f"({limits['description']})"
+            )
+            logger.info(
+                f"Vision max dimension: {VISION_MAX_DIMENSION}px "
+                f"(auto-configured for safety)"
+            )
+            logger.info(
+                f"Override with VISION_MAX_DIMENSION env var if needed"
+            )
+            return VISION_MAX_DIMENSION
+
+    # Fallback for systems < 8 GB
+    VISION_MAX_DIMENSION = 512
+    logger.warning(
+        f"System RAM: {system_ram_gb:.1f} GB is below recommended minimum (8 GB)"
+    )
+    logger.warning(
+        f"Vision max dimension: {VISION_MAX_DIMENSION}px (conservative limit)"
+    )
+    return VISION_MAX_DIMENSION
+
+
+def auto_resize_image(data: bytes, max_dim: int) -> Tuple[bytes, dict]:
+    """Resize image if needed, preserving aspect ratio.
+
+    Args:
+        data: Original image bytes
+        max_dim: Maximum dimension (width or height)
+
+    Returns:
+        Tuple of (resized_bytes, metadata)
+            metadata contains:
+                - original_dimensions: (width, height)
+                - resized: bool
+                - final_dimensions: (width, height)
+                - reason: str or None
+
+    Raises:
+        InvalidImageError: If image cannot be processed
+    """
+    from PIL import Image
+    import io
+
+    try:
+        # Open image
+        img = Image.open(io.BytesIO(data))
+        width, height = img.size
+
+        metadata = {
+            "original_dimensions": (width, height),
+            "resized": False,
+            "final_dimensions": (width, height),
+            "reason": None
+        }
+
+        # Check if resize needed
+        if width > max_dim or height > max_dim:
+            # Calculate new dimensions (preserve aspect ratio)
+            scale = min(max_dim / width, max_dim / height)
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+
+            # Resize with high-quality Lanczos resampling
+            img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+            # Save to bytes
+            output = io.BytesIO()
+            img.save(output, format='PNG', optimize=True)
+            resized_data = output.getvalue()
+
+            metadata.update({
+                "resized": True,
+                "final_dimensions": (new_width, new_height),
+                "reason": f"Memory optimization (max {max_dim}px)"
+            })
+
+            logger.info(
+                f"Auto-resized image: {width}x{height} → {new_width}x{new_height} "
+                f"(reduction: {100 * (1 - len(resized_data)/len(data)):.1f}%)"
+            )
+
+            return resized_data, metadata
+
+        return data, metadata
+
+    except Exception as e:
+        raise InvalidImageError(f"Failed to resize image: {e}")
+
+
+# Initialize resize cache (if enabled)
+_resize_cache = None
+if RESIZE_CACHE_ENABLED:
+    from .resize_cache import TimedResizeCache
+    _resize_cache = TimedResizeCache(
+        max_size=RESIZE_CACHE_SIZE,
+        ttl_seconds=RESIZE_CACHE_TTL
+    )
+
+
+def get_resize_cache():
+    """Get the global resize cache instance."""
+    return _resize_cache
+
+
+# ============================================================================
 
 
 def decode_data_url(data_url: str) -> Tuple[bytes, str]:
@@ -376,6 +563,7 @@ async def prepare_images(content_blocks: list, bridge=None) -> list:
     - Data URLs (base64): decode and validate
     - HTTP/HTTPS URLs: download, validate
     - Local file paths: load and validate
+    - Auto-resize with caching (v3.1.0)
     - Size-based routing: inline (<500KB) vs shared memory (≥500KB)
 
     Args:
@@ -427,7 +615,42 @@ async def prepare_images(content_blocks: list, bridge=None) -> list:
                 "Expected: data:image/..., http://, https://, or /path/to/file"
             )
 
-        # Validate image
+        # Validate image (before processing)
+        validate_image(image_bytes)
+
+        # Auto-resize with caching (v3.1.0)
+        resize_metadata = None
+        if AUTO_RESIZE_ENABLED and VISION_MAX_DIMENSION is not None:
+            # Keep reference to original for cache key
+            original_image_bytes = image_bytes
+
+            # Check cache first
+            cache = get_resize_cache()
+            if cache:
+                cached_resized = cache.get(original_image_bytes)
+                if cached_resized:
+                    logger.debug(f"Using cached resized image ({len(cached_resized)} bytes)")
+                    image_bytes = cached_resized
+                    resize_metadata = {"cached": True}
+                else:
+                    # Cache miss - resize and cache
+                    resized_bytes, resize_metadata = auto_resize_image(
+                        original_image_bytes,
+                        VISION_MAX_DIMENSION
+                    )
+                    if resize_metadata["resized"]:
+                        # Cache using original as key, resized as value
+                        cache.put(original_image_bytes, resized_bytes)
+                        resize_metadata["cached"] = False
+                    image_bytes = resized_bytes
+            else:
+                # Cache disabled - just resize
+                image_bytes, resize_metadata = auto_resize_image(
+                    original_image_bytes,
+                    VISION_MAX_DIMENSION
+                )
+
+        # Validate again after resize (paranoid check)
         validate_image(image_bytes)
 
         # Check total size

@@ -123,6 +123,46 @@ data:image/{format};base64,{base64_encoded_data}
 }
 ```
 
+### Dimension Limits (v3.1.0+)
+
+**Automatic resizing:** Images are automatically resized based on available system RAM to prevent memory exhaustion.
+
+**Why this matters:**
+- Vision models use quadratic memory scaling (patches² × layers)
+- Large images can cause 90-100GB+ memory allocation
+- Example: 2550×3300px image → 90-100GB RAM usage
+
+**Auto-resize limits by system RAM:**
+
+| System RAM | Max Dimension | Typical Systems |
+|------------|---------------|-----------------|
+| 128+ GB | 1024px | Mac Studio, high-end workstations |
+| 64 GB | 1024px | Mac Pro, professional systems |
+| 32 GB | 768px | MacBook Air M4, standard laptops |
+| 16 GB | 512px | Entry-level M-series Macs |
+| 8 GB | 512px | Minimum configuration |
+
+**Resize behavior:**
+- Preserves aspect ratio (high-quality Lanczos resampling)
+- Transparent to API clients (no special handling needed)
+- Images cached with TTL to avoid redundant processing
+- Happens automatically before inference
+
+**Configuration (optional):**
+```bash
+# Override auto-detection
+export VISION_MAX_DIMENSION=1024
+
+# Disable auto-resize (not recommended - may cause OOM)
+export VISION_AUTO_RESIZE=false
+
+# Cache configuration
+export VISION_RESIZE_CACHE_SIZE=20      # Number of cached images
+export VISION_RESIZE_CACHE_TTL=3600     # TTL in seconds (1 hour)
+```
+
+**Best practice:** Let the server auto-configure based on available RAM. Manual override only needed for specific use cases.
+
 ### Encoding Example (Python)
 
 ```python
@@ -247,7 +287,11 @@ content = [
 
 ### Vision Model (Qwen2.5-VL-7B-Instruct-4bit)
 - **Speed:** ~54-95 tokens/second
-- **Memory:** ~5.8 GB
+- **Memory:** ~5.8 GB (base model) + image processing overhead
+  - Small images (512px): ~5.8 GB total
+  - Medium images (768px): ~5.8-6 GB total
+  - Large images (1024px): ~6-8 GB total
+  - Very large images: Automatically resized to safe limits (v3.1.0+)
 - **First request:** Slower (model loading ~5-10s)
 - **Subsequent:** Fast (model cached)
 
@@ -485,8 +529,8 @@ print(result)
 - ❌ Accept images >10MB (security limit)
 - ❌ Process multiple concurrent requests (single worker)
 - ❌ Stream responses (not implemented)
-- ❌ Store or cache images (stateless)
-- ❌ Preprocess images (resize, enhance, etc.)
+- ❌ Store images long-term (stateless, but has short-term TTL cache)
+- ❌ Image enhancement or filtering
 
 ### Can Do
 - ✅ Process base64-encoded images
@@ -494,6 +538,8 @@ print(result)
 - ✅ OpenAI-compatible API
 - ✅ High performance on Apple Silicon
 - ✅ Multiple model support (text and vision)
+- ✅ **Automatic image resizing** (v3.1.0+) based on system RAM
+- ✅ **Resize caching** (v3.1.0+) with TTL for performance
 
 ---
 

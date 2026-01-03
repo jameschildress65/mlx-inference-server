@@ -118,6 +118,12 @@ def main():
     logger.info(f"Idle Timeout: {config.idle_timeout_seconds}s")
     logger.info("=" * 70)
 
+    # Initialize vision auto-resize limits (v3.1.0)
+    from src.orchestrator.image_utils import detect_system_limits
+    logger.info("Detecting vision processing limits...")
+    detect_system_limits()
+    logger.info("Vision processing initialized")
+
     # Create worker manager
     worker_manager = WorkerManager(config)
     worker_manager_global = worker_manager

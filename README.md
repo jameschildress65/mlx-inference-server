@@ -225,6 +225,54 @@ See [docs/API-REFERENCE.md](docs/API-REFERENCE.md) for complete API documentatio
 - [Security Best Practices](docs/SECURITY-BEST-PRACTICES.md) - Security hardening
 - [Performance Tuning](docs/PERFORMANCE-TUNING.md) - Optimization guide
 
+## Vision Processing Guidelines
+
+**v3.1.0+**: Automatic memory management for vision models
+
+### Memory Scaling
+
+Vision models use quadratic memory scaling due to attention mechanisms:
+- Memory usage scales with image dimensions squared (patches² × layers)
+- Large images can cause significant memory allocation
+- Example: 2550×3300px image can use 90-100GB RAM on a 7B vision model
+
+### Auto-Resize Protection
+
+The server automatically resizes images based on available RAM:
+
+| System RAM | Max Dimension | Target Use Case |
+|------------|---------------|-----------------|
+| 128+ GB | 1024px | High-end workstations |
+| 64 GB | 1024px | Professional systems |
+| 32 GB | 768px | MacBook Air, standard laptops |
+| 16 GB | 512px | Entry-level M-series Macs |
+| 8 GB | 512px | Minimum (not recommended) |
+
+**Key features:**
+- Preserves aspect ratio (Lanczos resampling)
+- LRU cache with TTL (reduces redundant processing)
+- Images automatically resized if they exceed safe limits
+- Zero configuration required
+
+### Configuration
+
+Override auto-detection if needed:
+
+```bash
+# Environment variables
+export VISION_MAX_DIMENSION=1024        # Manual dimension limit
+export VISION_AUTO_RESIZE=false         # Disable auto-resize (not recommended)
+export VISION_RESIZE_CACHE_ENABLED=true # Enable resize cache (default)
+export VISION_RESIZE_CACHE_SIZE=20      # Cache size (default: 20 images)
+export VISION_RESIZE_CACHE_TTL=3600     # TTL in seconds (default: 1 hour)
+```
+
+**Best practices:**
+- Let auto-detection configure limits (recommended)
+- On systems with limited RAM, consider using smaller models
+- Monitor memory usage during vision processing
+- Resize images client-side for optimal performance
+
 ## Testing
 
 ```bash

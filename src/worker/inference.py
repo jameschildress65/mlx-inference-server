@@ -474,6 +474,17 @@ class VisionInferenceBackend(InferenceBackend):
 
         logger.debug(f"Generated vision response: {len(output_text)} chars, ~{tokens} tokens")
 
+        # MLX Optimization (v3.1.0): Clear GPU cache after vision inference
+        # Recommended by Opus 4.5 + Apple/MLX team for memory management
+        try:
+            import mlx.core as mx
+            if hasattr(mx, 'metal'):
+                mx.metal.clear_cache()
+                logger.debug("Cleared MLX GPU cache after vision inference")
+        except Exception as e:
+            # Non-critical - log but continue
+            logger.debug(f"Could not clear MLX cache: {e}")
+
         return {
             "text": output_text,
             "tokens": tokens,
