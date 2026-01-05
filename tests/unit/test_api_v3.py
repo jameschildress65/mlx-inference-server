@@ -67,7 +67,7 @@ class TestMainAPIEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
-        assert data["version"] == "3.0.0-alpha"
+        assert data["version"] == "3.1.0"
 
     def test_completions_loads_model_on_demand(self, mock_config, mock_worker_manager):
         """Test /v1/completions loads model if not loaded."""
@@ -291,7 +291,7 @@ class TestAdminAPIEndpoints:
         data = response.json()
         assert data["status"] == "healthy"
         assert data["worker_status"] == "healthy"
-        assert data["version"] == "3.0.0-alpha"
+        assert data["version"] == "3.1.0"
 
     def test_admin_status_endpoint(self, mock_config, mock_worker_manager):
         """Test GET /admin/status endpoint."""
@@ -314,7 +314,7 @@ class TestAdminAPIEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "running"
-        assert data["version"] == "3.0.0-alpha"
+        assert data["version"] == "3.1.0"
         assert data["ports"]["main"] == 11440
         assert data["ports"]["admin"] == 11441
         assert data["model"]["loaded"] is True
@@ -534,3 +534,72 @@ class TestMultimodalContentParsing:
         })
 
         assert response.status_code == 422  # Validation error
+
+    def test_max_tokens_cap_enforced(self, mock_config, mock_worker_manager):
+        """Test that max_tokens is capped at 2000."""
+        mock_worker_manager.get_status.return_value = {
+            "model_loaded": True,
+            "model_name": "test-model",
+            "memory_gb": 4.5
+        }
+
+        # Mock generate to capture the actual request
+        captured_request = None
+        def capture_request(request):
+            nonlocal captured_request
+            captured_request = request
+            return {
+                "text": "Test response",
+                "tokens": 10,
+                "finish_reason": "stop"
+            }
+        
+        mock_worker_manager.generate.side_effect = capture_request
+
+        app = create_app(mock_config, mock_worker_manager)
+        client = TestClient(app)
+
+        # Request with max_tokens > 2000 (should be capped)
+        response = client.post("/v1/chat/completions", json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Test"}],
+            "max_tokens": 5000  # Request 5000
+        })
+
+        assert response.status_code == 200
+        # Verify the request was capped to 2000
+        assert captured_request.max_tokens == 2000
+
+    def test_max_tokens_cap_not_applied_when_below_limit(self, mock_config, mock_worker_manager):
+        """Test that max_tokens under 2000 is not modified."""
+        mock_worker_manager.get_status.return_value = {
+            "model_loaded": True,
+            "model_name": "test-model",
+            "memory_gb": 4.5
+        }
+
+        captured_request = None
+        def capture_request(request):
+            nonlocal captured_request
+            captured_request = request
+            return {
+                "text": "Test response",
+                "tokens": 10,
+                "finish_reason": "stop"
+            }
+        
+        mock_worker_manager.generate.side_effect = capture_request
+
+        app = create_app(mock_config, mock_worker_manager)
+        client = TestClient(app)
+
+        # Request with max_tokens < 2000 (should not be capped)
+        response = client.post("/v1/chat/completions", json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Test"}],
+            "max_tokens": 500  # Request 500
+        })
+
+        assert response.status_code == 200
+        # Verify the request was NOT modified
+        assert captured_request.max_tokens == 500

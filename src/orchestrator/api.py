@@ -128,7 +128,7 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
     app = FastAPI(
         title="MLX Server V3",
         description="Production-grade LLM inference server with process isolation",
-        version="3.0.0"
+        version="3.1.0"
     )
 
     # OpenAI-compatible error formatting
@@ -172,7 +172,7 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
     @app.get("/health")
     async def health_check():
         """Basic health check."""
-        return {"status": "healthy", "version": "3.0.0"}
+        return {"status": "healthy", "version": "3.1.0"}
 
     # V1 Completions endpoint
     @app.post("/v1/completions")
@@ -305,7 +305,16 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
             Chat completion response
         """
         # Convert chat messages to prompt using model's chat template
-        logger.info(f"Chat completion request: stream={request.stream}, messages={len(request.messages)}")
+        logger.info(f"Chat completion request: stream={request.stream}, messages={len(request.messages)}, "
+                   f"max_tokens={request.max_tokens}, temp={request.temperature}, "
+                   f"top_p={request.top_p}, rep_penalty={request.repetition_penalty}")
+
+        # Enforce server-side max_tokens cap to prevent runaway generation
+        MAX_TOKENS_LIMIT = 2000
+        if request.max_tokens > MAX_TOKENS_LIMIT:
+            logger.warning(f"Client requested {request.max_tokens} tokens, capping to {MAX_TOKENS_LIMIT}")
+            request.max_tokens = MAX_TOKENS_LIMIT
+
         try:
             # Get cached tokenizer (Phase 1.1 optimization)
             tokenizer = get_tokenizer(request.model)
@@ -561,7 +570,7 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
     app = FastAPI(
         title="MLX Server V3 - Admin API",
         description="Administrative endpoints for model management",
-        version="3.0.0"
+        version="3.1.0"
     )
 
     @app.get("/admin/health")
@@ -571,7 +580,7 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
         return {
             "status": "healthy" if health["healthy"] else "degraded",
             "worker_status": health["status"],
-            "version": "3.0.0"
+            "version": "3.1.0"
         }
 
     @app.get("/admin/status")
@@ -582,7 +591,7 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
 
         return {
             "status": "running",
-            "version": "3.0.0",
+            "version": "3.1.0",
             "ports": {
                 "main": config.main_port,
                 "admin": config.admin_port

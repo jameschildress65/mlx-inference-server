@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Request parameter logging** - Enhanced debugging and monitoring
+  - Log max_tokens, temperature, top_p, repetition_penalty for all requests
+  - Helps diagnose timeout issues and client behavior
+  - Files changed: `src/orchestrator/api.py`
+
+- **HF_HOME fallback in daemon script** - Robust model cache configuration
+  - Daemon script now sets HF_HOME with fallback to `~/.cache/huggingface`
+  - Works across manual starts, launchd, cron scenarios
+  - Each machine can override via shell config
+  - Files changed: `bin/mlx-inference-server-daemon.sh`
+
+### Changed
+- **Request timeout reduced** - Faster failure detection
+  - High-memory systems: 600s → 300s (5 minutes)
+  - Prevents long hangs while allowing reasonable generation
+  - Aligns with 2000 token cap (worst case: 6.6 tok/s acceptable)
+  - Files changed: `src/config/server_config.py`
+
+- **Server-side max_tokens cap** - Prevent runaway generation
+  - Maximum 2000 tokens enforced server-side
+  - Logs warning when client requests exceed cap
+  - Protects against infinite generation loops
+  - Files changed: `src/orchestrator/api.py`
+  - Tests added: `tests/unit/test_api_v3.py`
+
+- **Version updated to 3.1.0** - Proper semantic versioning
+  - Updated from development version to production release
+  - Files changed: `src/orchestrator/api.py`
+  - Tests updated: `tests/unit/test_api_v3.py`
+
 ### Fixed
 - **Vision API image threshold bug** - Images ≥500KB now work properly
   - Increased INLINE_THRESHOLD from 500KB to 10MB

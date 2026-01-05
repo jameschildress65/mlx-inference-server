@@ -166,7 +166,7 @@ class ServerConfig:
         if ram_gb >= 64:
             return "high-memory", {
                 "idle_timeout_seconds": 600,      # 10 minutes
-                "request_timeout_seconds": 600,   # 10 minutes (long contexts)
+                "request_timeout_seconds": 300,   # 5 minutes (with 2000 token cap)
                 "memory_threshold_gb": ram_gb - 20,  # Leave 20GB for system
                 "cache_dir": default_cache,
                 "description": f"High-memory configuration ({ram_gb}GB RAM)"

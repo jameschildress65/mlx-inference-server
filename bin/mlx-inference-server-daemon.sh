@@ -17,6 +17,10 @@ PID_FILE="/tmp/mlx-inference-server.pid"
 LOG_DIR="$PROJECT_ROOT/logs"
 LOG_FILE="$LOG_DIR/mlx-inference-server.log"
 
+# Set HF_HOME - use shell env if set, otherwise use default
+# Each machine can override via ~/.zshrc or other shell config
+export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
