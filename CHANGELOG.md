@@ -57,6 +57,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.1.1] - 2026-01-05
+
+### Fixed
+- **Critical: Orchestrator hang after worker timeout** - Prevents 1200s deadlock
+  - Worker timeouts now trigger immediate cleanup instead of stdio fallback
+  - Prevents double-timeout scenario (600s shared memory + 600s stdio = 1200s hang)
+  - Orchestrator remains responsive after worker timeout, returns error to client
+  - New `WorkerTimeoutError` exception type for precise timeout handling
+  - Force-kill hung workers with `_force_kill_hung_worker()` method
+  - Files changed: `src/orchestrator/worker_manager.py`, `src/ipc/shared_memory_bridge.py`, `src/ipc/stdio_bridge.py`
+  - Tests added: `tests/unit/test_worker_timeout_fix.py` (7 unit tests)
+  - Commit: f0d1c91
+
+### Technical Details
+**Timeout Fix:**
+- Previous behavior: Worker timeout → stdio fallback → second 600s timeout → orchestrator deadlock
+- Root cause: Exception fallback logic treated timeout as transient IPC error
+- Solution: Distinguish `WorkerTimeoutError` from generic `WorkerCommunicationError`
+- Timeout handling: Catch timeout specifically, force-kill worker, skip stdio retry
+- Non-timeout IPC errors: Still fall back to stdio (preserves resilience for transient errors)
+- Impact: Critical production bug eliminated, orchestrator never hangs on worker timeout
+- Opus-reviewed and approved approach using exception type hierarchy
+
+---
+
 ## [3.0.0] - 2025-01-02
 
 ### Added

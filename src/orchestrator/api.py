@@ -128,7 +128,7 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
     app = FastAPI(
         title="MLX Server V3",
         description="Production-grade LLM inference server with process isolation",
-        version="3.1.0"
+        version="3.1.1"
     )
 
     # OpenAI-compatible error formatting
@@ -172,7 +172,7 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
     @app.get("/health")
     async def health_check():
         """Basic health check."""
-        return {"status": "healthy", "version": "3.1.0"}
+        return {"status": "healthy", "version": "3.1.1"}
 
     # V1 Completions endpoint
     @app.post("/v1/completions")
@@ -564,7 +564,7 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
     app = FastAPI(
         title="MLX Server V3 - Admin API",
         description="Administrative endpoints for model management",
-        version="3.1.0"
+        version="3.1.1"
     )
 
     @app.get("/admin/health")
@@ -574,7 +574,7 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
         return {
             "status": "healthy" if health["healthy"] else "degraded",
             "worker_status": health["status"],
-            "version": "3.1.0"
+            "version": "3.1.1"
         }
 
     @app.get("/admin/status")
@@ -585,7 +585,7 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
 
         return {
             "status": "running",
-            "version": "3.1.0",
+            "version": "3.1.1",
             "ports": {
                 "main": config.main_port,
                 "admin": config.admin_port
