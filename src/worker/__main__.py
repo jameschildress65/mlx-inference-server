@@ -46,6 +46,7 @@ from src.ipc.shared_memory_bridge import SharedMemoryBridge, WorkerSharedMemoryH
 from src.ipc.messages import CompletionRequest, PingMessage, ShutdownMessage
 from src.worker.model_loader import ModelLoader
 from src.worker.inference import InferenceEngine
+from src.worker.generation_monitor import get_monitor, GenerationTimeout
 from src.utils.memory_utils import get_memory_usage_gb
 
 # Configure logging
@@ -122,12 +123,24 @@ class WorkerProcess:
         # PHASE 2: Detect IPC method (shared memory or stdio)
         self.handler, self.shmem_bridge = detect_ipc_method(shm_name)
 
+        # Initialize generation monitor (300s = 5 min timeout, 10s heartbeat)
+        self.gen_monitor = get_monitor(max_seconds=300, heartbeat_interval=10)
+        self.gen_monitor.start_heartbeat()
+
         # Set up signal handlers
         signal.signal(signal.SIGTERM, self._handle_sigterm)
         signal.signal(signal.SIGINT, self._handle_sigint)
 
     def _cleanup(self):
         """Clean up resources (PHASE 2: includes shared memory)."""
+        # Stop heartbeat monitoring
+        if self.gen_monitor:
+            try:
+                self.gen_monitor.stop_heartbeat()
+            except Exception as e:
+                logger.warning(f"Failed to stop heartbeat: {e}")
+
+        # Clean up shared memory
         if self.shmem_bridge:
             try:
                 self.shmem_bridge.close()
@@ -194,41 +207,57 @@ class WorkerProcess:
                     break
 
                 elif isinstance(request, CompletionRequest):
-                    # Generate completion
+                    # Generate completion with monitoring
                     try:
-                        if request.stream:
-                            # Streaming completion (Phase 2/3)
-                            for chunk in self.inference_engine.generate_stream(
-                                prompt=request.prompt,
-                                max_tokens=request.max_tokens,
-                                temperature=request.temperature,
-                                top_p=request.top_p,
-                                repetition_penalty=request.repetition_penalty,
-                                images=request.images  # Phase 3: Pass images for vision models
-                            ):
-                                # Send each chunk
-                                self.handler.send_stream_chunk(
-                                    text=chunk["text"],
-                                    token=chunk["token"],
-                                    done=chunk["done"],
-                                    finish_reason=chunk["finish_reason"]
+                        with self.gen_monitor.monitor_generation(
+                            prompt_length=len(request.prompt),
+                            max_tokens=request.max_tokens,
+                            temperature=request.temperature
+                        ):
+                            if request.stream:
+                                # Streaming completion (Phase 2/3)
+                                for chunk in self.inference_engine.generate_stream(
+                                    prompt=request.prompt,
+                                    max_tokens=request.max_tokens,
+                                    temperature=request.temperature,
+                                    top_p=request.top_p,
+                                    repetition_penalty=request.repetition_penalty,
+                                    images=request.images  # Phase 3: Pass images for vision models
+                                ):
+                                    # Send each chunk
+                                    self.handler.send_stream_chunk(
+                                        text=chunk["text"],
+                                        token=chunk["token"],
+                                        done=chunk["done"],
+                                        finish_reason=chunk["finish_reason"]
+                                    )
+                            else:
+                                # Non-streaming completion
+                                result = self.inference_engine.generate(
+                                    prompt=request.prompt,
+                                    max_tokens=request.max_tokens,
+                                    temperature=request.temperature,
+                                    top_p=request.top_p,
+                                    repetition_penalty=request.repetition_penalty,
+                                    images=request.images  # Phase 3: Pass images for vision models
                                 )
-                        else:
-                            # Non-streaming completion
-                            result = self.inference_engine.generate(
-                                prompt=request.prompt,
-                                max_tokens=request.max_tokens,
-                                temperature=request.temperature,
-                                top_p=request.top_p,
-                                repetition_penalty=request.repetition_penalty,
-                                images=request.images  # Phase 3: Pass images for vision models
-                            )
 
-                            self.handler.send_completion(
-                                text=result["text"],
-                                tokens=result["tokens"],
-                                finish_reason=result["finish_reason"]
-                            )
+                                self.handler.send_completion(
+                                    text=result["text"],
+                                    tokens=result["tokens"],
+                                    finish_reason=result["finish_reason"]
+                                )
+
+                    except GenerationTimeout as e:
+                        # Worker hung - timeout exceeded
+                        logger.error(f"Generation timeout - worker terminating: {e}")
+                        self.handler.send_error(
+                            error="GenerationTimeout",
+                            message=f"Worker hung for {self.gen_monitor.max_seconds}s - terminating"
+                        )
+                        # Exit immediately - this worker is likely deadlocked
+                        self._cleanup()
+                        sys.exit(1)
 
                     except Exception as e:
                         logger.error(f"Generation failed: {e}", exc_info=True)
