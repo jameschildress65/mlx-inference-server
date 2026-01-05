@@ -2,6 +2,8 @@
 
 **⚡ Get MLX Inference Server running in 10 minutes**
 
+**Note:** This guide installs text-only models. For vision/multimodal support, use `bash install.sh` instead (see [Vision Setup Guide](docs/VISION-SETUP.md)).
+
 ---
 
 ## System Requirements
@@ -53,12 +55,14 @@ python mlx_inference_server.py
 curl http://localhost:11440/health
 ```
 
-### 2. Load Model
+### 2. Load Model (Text Only)
 ```bash
 curl -X POST "http://localhost:11441/admin/load?model_path=mlx-community/Qwen2.5-7B-Instruct-4bit"
 ```
 
 **Wait for download (first time: ~5 min)**
+
+**Note:** Vision models (e.g., Qwen2.5-VL-7B-Instruct-4bit) require `venv-vision`. Run `bash install.sh` for vision support.
 
 ### 3. Generate
 ```bash

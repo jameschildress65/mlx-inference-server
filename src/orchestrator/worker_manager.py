@@ -335,6 +335,11 @@ class WorkerManager:
             WorkerSpawnError: If worker fails to start
             WorkerTimeoutError: If ready signal not received
         """
+        # CRITICAL: Update activity BEFORE acquiring lock to prevent idle monitor race
+        # Race scenario: Model loads (5s), idle monitor fires during load, sees stale
+        # last_activity_time, unloads model before request can start
+        self._update_activity()
+
         with self.lock:
             start_time = time.time()
 
@@ -463,7 +468,8 @@ class WorkerManager:
                     f"({self.active_memory_gb:.2f} GB in {load_time:.1f}s)"
                 )
 
-                # Update activity timestamp - loading is an activity
+                # Update activity timestamp again (also updated at start of load_model)
+                # This sets accurate idle timer start - idle period starts AFTER load completes
                 self._update_activity()
 
                 return ModelLoadResult(
