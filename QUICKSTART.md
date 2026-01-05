@@ -55,9 +55,7 @@ curl http://localhost:11440/health
 
 ### 2. Load Model
 ```bash
-curl -X POST http://localhost:11441/admin/load \
-  -H "Content-Type: application/json" \
-  -d '{"model_name":"mlx-community/Qwen2.5-7B-Instruct-4bit"}'
+curl -X POST "http://localhost:11441/admin/load?model_path=mlx-community/Qwen2.5-7B-Instruct-4bit"
 ```
 
 **Wait for download (first time: ~5 min)**
