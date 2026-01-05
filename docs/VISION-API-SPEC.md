@@ -526,7 +526,7 @@ print(result)
 
 ### Cannot Do
 - ❌ Convert PDFs (client must do this)
-- ❌ Accept images >10MB (security limit)
+- ❌ Accept images >10MB (size limit)
 - ❌ Process multiple concurrent requests (single worker)
 - ❌ Stream responses (not implemented)
 - ❌ Store images long-term (stateless, but has short-term TTL cache)
@@ -543,15 +543,11 @@ print(result)
 
 ---
 
-## Security Considerations
+## Image Limits
 
-### Image Size Limit
-**10MB limit is non-negotiable** (security hardening from Opus 4.5 review).
+Maximum image size: **10 MB**
 
-**Rationale:**
-- Prevents DoS attacks
-- Prevents memory exhaustion
-- Forces reasonable image sizes
+This limit ensures stable operation and prevents memory issues with large images.
 - Encourages efficient preprocessing
 
 ### Local Only

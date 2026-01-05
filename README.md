@@ -4,7 +4,7 @@ Production-grade LLM inference server for Apple Silicon with process isolation a
 
 ## Why This Exists
 
-Built to address limitations in existing MLX servers: lack of process isolation, unreliable crash recovery, and missing production-grade features. Developed iteratively with Claude Code and refined through multiple code reviews with Claude Opus to ensure correctness and reliability.
+Built to address limitations in existing MLX servers: lack of process isolation, unreliable crash recovery, and missing production-grade features.
 
 **Key principle**: Personal use case driving development, sharing in case helpful to others.
 
@@ -162,39 +162,6 @@ export HF_HOME=~/.cache/huggingface  # Model cache directory
 - Cross-process visibility guarantees
 - No busy-waiting
 
-## Development Story
-
-### Iteration Process
-
-1. **Initial Implementation**: Built basic functionality
-2. **Opus Review #1**: Identified 3 critical correctness issues
-3. **Fix Iteration**: Implemented POSIX semaphores, atomic writes, signal-safe handlers
-4. **Opus Review #2**: Verified fixes, certified as production-ready
-5. **Performance Testing**: Benchmarked against alternatives
-
-### Tools Used
-
-- **Claude Code**: Primary development environment
-- **Claude Opus**: Code review and architectural guidance
-- **Apple MLX**: Underlying inference framework
-
-### Design Decisions
-
-**Why POSIX semaphores over locks?**
-- Kernel-level memory barriers (critical on ARM64)
-- Cross-process support
-- Signal-safe (no deadlock in signal handlers)
-
-**Why atomic file operations?**
-- Eliminates corruption window on crash
-- POSIX guarantees for `rename()` atomicity
-- Safe even during power loss
-
-**Why pipe-based signals?**
-- `os.write()` is async-signal-safe per POSIX
-- No locks in signal handlers
-- Clean background thread cleanup
-
 ## Performance
 
 Tested on Apple Silicon with various model sizes. Example benchmark (compared to Ollama):
@@ -220,10 +187,8 @@ See [docs/API-REFERENCE.md](docs/API-REFERENCE.md) for complete API documentatio
 ## Documentation
 
 - [API Reference](docs/API-REFERENCE.md) - Complete API documentation
-- [Vision API Specification](docs/VISION-API-SPEC.md) - Vision/multimodal API for integrators
+- [Vision API Specification](docs/VISION-API-SPEC.md) - Vision/multimodal API
 - [Deployment Guide](docs/DEPLOYMENT-GUIDE.md) - Production deployment
-- [Security Best Practices](docs/SECURITY-BEST-PRACTICES.md) - Security hardening
-- [Performance Tuning](docs/PERFORMANCE-TUNING.md) - Optimization guide
 
 ## Vision Processing Guidelines
 
@@ -305,8 +270,3 @@ MIT License - see LICENSE file for details.
 ## Contributing
 
 This is a personal project shared for community benefit. Issues and PRs welcome, but response time may vary.
-
----
-
-**Built with Claude Code**
-Developed through iterative refinement and code review with Claude Opus

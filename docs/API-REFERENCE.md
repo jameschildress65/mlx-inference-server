@@ -236,10 +236,10 @@ Content-Type: application/json
 
 **Response**: Same format as regular chat completion
 
-**Security Limits**:
+**Image Limits**:
 - Max images per request: 5
-- Max image size: 10MB (decoded)
-- Max image pixels: 50 megapixels (PIL decompression bomb protection)
+- Max image size: 10MB
+- Max image pixels: 50 megapixels
 - Supported formats: JPEG, PNG, WebP, BMP, GIF
 
 **Image URL Formats**:
