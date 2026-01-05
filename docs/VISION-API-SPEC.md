@@ -569,7 +569,6 @@ Server listens on `localhost:11440` only (not exposed to network).
 ### Documentation
 - **Vision Setup:** `docs/VISION-SETUP.md`
 - **Main README:** `README.md`
-- **Unauthorized Changes:** `docs/UNAUTHORIZED-RAGMT-CHANGES.md`
 
 ### Logs
 ```bash
