@@ -32,6 +32,11 @@ class WorkerCommunicationError(StdioIPCError):
     pass
 
 
+class WorkerTimeoutError(WorkerCommunicationError):
+    """Worker did not respond within timeout period."""
+    pass
+
+
 class StdioBridge:
     """Manages stdin/stdout JSON communication with worker subprocess."""
 
@@ -112,7 +117,7 @@ class StdioBridge:
                 # Use select() to implement timeout
                 ready, _, _ = select.select([process.stdout], [], [], timeout)
                 if not ready:
-                    raise WorkerCommunicationError(
+                    raise WorkerTimeoutError(
                         f"Worker timeout after {timeout}s - no response received"
                     )
 

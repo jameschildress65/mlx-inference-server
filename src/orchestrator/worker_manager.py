@@ -10,11 +10,12 @@ import logging
 from typing import Optional, Dict, Any, Set
 from pathlib import Path
 
-from ..ipc.stdio_bridge import StdioBridge, WorkerCommunicationError
+from ..ipc.stdio_bridge import StdioBridge, WorkerCommunicationError, WorkerTimeoutError
 from ..ipc.shared_memory_bridge import (
     SharedMemoryBridge,
     SharedMemoryIPCError,
-    WorkerCommunicationError as ShmemWorkerError
+    WorkerCommunicationError as ShmemWorkerError,
+    WorkerTimeoutError as ShmemWorkerTimeoutError
 )
 from ..ipc.messages import CompletionRequest, PingMessage, ShutdownMessage
 from .process_registry import get_registry
@@ -252,11 +253,20 @@ class WorkerManager:
         Receive message via shared memory or stdio (with fallback).
 
         PHASE 2: Uses SharedMemoryBridge if available, falls back to stdio.
+
+        Raises:
+            WorkerTimeoutError: If worker does not respond within timeout period
         """
         if self._shmem_bridge:
             try:
                 return SharedMemoryBridge.receive_message_shmem(self._shmem_bridge, timeout)
+            except ShmemWorkerTimeoutError as e:
+                # TIMEOUT: Worker is hung - force cleanup, do NOT retry with stdio
+                self.logger.error(f"Worker timeout after {timeout}s - force cleanup (PID: {self.active_worker.pid if self.active_worker else 'unknown'})")
+                self._force_kill_hung_worker(timeout_duration=timeout)
+                raise  # Propagate timeout error to caller
             except (SharedMemoryIPCError, ShmemWorkerError) as e:
+                # Other IPC errors: Fall back to stdio
                 self.logger.warning(f"Shared memory receive failed, falling back to stdio: {e}")
                 self._shmem_bridge = None  # Disable shared memory for this worker
                 self._use_shmem = False
@@ -806,6 +816,38 @@ class WorkerManager:
         self.active_model_name = None
         self.active_memory_gb = 0.0
         self._current_shm_name = None
+
+    def _force_kill_hung_worker(self, timeout_duration: int) -> None:
+        """
+        Force-kill hung worker after timeout (no graceful shutdown attempt).
+
+        Called when worker exceeds timeout during generation - indicates deadlock
+        in MLX code. Worker is unresponsive and must be terminated immediately.
+
+        Args:
+            timeout_duration: How long worker was hung (for logging)
+        """
+        if self.active_worker is None:
+            return
+
+        pid = self.active_worker.pid
+        model = self.active_model_name or "unknown"
+
+        self.logger.error(
+            f"HUNG WORKER DETECTED: PID {pid} hung for {timeout_duration}s "
+            f"while processing {model}. Force-killing immediately."
+        )
+
+        # Use existing _kill_worker() which handles registry termination + SHM cleanup
+        self._kill_worker()
+
+        # Use existing _cleanup_dead_worker() to reset state
+        self._cleanup_dead_worker()
+
+        self.logger.warning(
+            f"Hung worker {pid} killed and cleaned up. "
+            f"Orchestrator ready for new requests."
+        )
 
     def get_status(self) -> Dict[str, Any]:
         """

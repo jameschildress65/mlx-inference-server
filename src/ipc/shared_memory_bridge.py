@@ -86,6 +86,11 @@ class WorkerCommunicationError(SharedMemoryIPCError):
     pass
 
 
+class WorkerTimeoutError(WorkerCommunicationError):
+    """Worker did not respond within timeout period."""
+    pass
+
+
 class SharedMemoryBridge:
     """
     High-performance IPC using POSIX shared memory with pipe-based signaling.
@@ -646,7 +651,7 @@ class SharedMemoryBridge:
 
         data_bytes = bridge.recv_response(timeout)
         if data_bytes is None:
-            raise WorkerCommunicationError(f"Worker timeout after {timeout}s")
+            raise WorkerTimeoutError(f"Worker timeout after {timeout}s")
 
         try:
             data = json.loads(data_bytes.decode('utf-8'))
