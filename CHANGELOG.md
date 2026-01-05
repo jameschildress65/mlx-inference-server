@@ -22,19 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Files changed: `bin/mlx-inference-server-daemon.sh`
 
 ### Changed
-- **Request timeout reduced** - Faster failure detection
-  - High-memory systems: 600s → 300s (5 minutes)
-  - Prevents long hangs while allowing reasonable generation
-  - Aligns with 2000 token cap (worst case: 6.6 tok/s acceptable)
-  - Files changed: `src/config/server_config.py`
-
-- **Server-side max_tokens cap** - Prevent runaway generation
-  - Maximum 2000 tokens enforced server-side
-  - Logs warning when client requests exceed cap
-  - Protects against infinite generation loops
-  - Files changed: `src/orchestrator/api.py`
-  - Tests added: `tests/unit/test_api_v3.py`
-
 - **Version updated to 3.1.0** - Proper semantic versioning
   - Updated from development version to production release
   - Files changed: `src/orchestrator/api.py`

@@ -309,12 +309,6 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                    f"max_tokens={request.max_tokens}, temp={request.temperature}, "
                    f"top_p={request.top_p}, rep_penalty={request.repetition_penalty}")
 
-        # Enforce server-side max_tokens cap to prevent runaway generation
-        MAX_TOKENS_LIMIT = 2000
-        if request.max_tokens > MAX_TOKENS_LIMIT:
-            logger.warning(f"Client requested {request.max_tokens} tokens, capping to {MAX_TOKENS_LIMIT}")
-            request.max_tokens = MAX_TOKENS_LIMIT
-
         try:
             # Get cached tokenizer (Phase 1.1 optimization)
             tokenizer = get_tokenizer(request.model)
