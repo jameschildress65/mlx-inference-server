@@ -123,8 +123,8 @@ class WorkerProcess:
         # PHASE 2: Detect IPC method (shared memory or stdio)
         self.handler, self.shmem_bridge = detect_ipc_method(shm_name)
 
-        # Initialize generation monitor (300s = 5 min timeout, 10s heartbeat)
-        self.gen_monitor = get_monitor(max_seconds=300, heartbeat_interval=10)
+        # Initialize generation monitor (600s = 10 min timeout, 10s heartbeat)
+        self.gen_monitor = get_monitor(max_seconds=600, heartbeat_interval=10)
         self.gen_monitor.start_heartbeat()
 
         # Set up signal handlers

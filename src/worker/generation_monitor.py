@@ -35,12 +35,12 @@ class GenerationMonitor:
     - Detailed logging: Tracks generation start/end/duration
     """
 
-    def __init__(self, max_seconds: int = 300, heartbeat_interval: int = 10):
+    def __init__(self, max_seconds: int = 600, heartbeat_interval: int = 10):
         """
         Initialize generation monitor.
 
         Args:
-            max_seconds: Maximum seconds allowed for generation (default: 5 minutes)
+            max_seconds: Maximum seconds allowed for generation (default: 10 minutes)
             heartbeat_interval: Seconds between heartbeat signals (default: 10s)
         """
         self.max_seconds = max_seconds
@@ -198,12 +198,12 @@ class GenerationMonitor:
 _monitor_instance: Optional[GenerationMonitor] = None
 
 
-def get_monitor(max_seconds: int = 300, heartbeat_interval: int = 10) -> GenerationMonitor:
+def get_monitor(max_seconds: int = 600, heartbeat_interval: int = 10) -> GenerationMonitor:
     """
     Get global generation monitor instance.
 
     Args:
-        max_seconds: Timeout in seconds (default: 5 minutes)
+        max_seconds: Timeout in seconds (default: 10 minutes)
         heartbeat_interval: Heartbeat interval in seconds (default: 10s)
 
     Returns:
