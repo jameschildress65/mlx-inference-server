@@ -50,6 +50,8 @@ python mlx_inference_server.py
 
 ## Test (New Terminal Window)
 
+**⚠️ TEXT MODELS ONLY:** This setup supports text-only models. Vision models will fail with `Vision environment not found`. For vision support, use `bash install.sh` instead (see [Vision Setup](docs/VISION-SETUP.md)).
+
 ### 1. Health Check
 ```bash
 curl http://localhost:11440/health

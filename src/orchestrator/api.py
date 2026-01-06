@@ -278,6 +278,9 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         except HTTPException:
             # Re-raise HTTP exceptions (like 501 for streaming)
             raise
+        except ValueError as e:
+            # Validation errors (e.g., "Vision model requires at least one image")
+            raise HTTPException(status_code=400, detail=str(e))
         except NoModelLoadedError as e:
             raise HTTPException(status_code=503, detail=str(e))
         except WorkerCommunicationError as e:
@@ -495,6 +498,9 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         except HTTPException:
             # Re-raise HTTP exceptions
             raise
+        except ValueError as e:
+            # Validation errors (e.g., "Vision model requires at least one image")
+            raise HTTPException(status_code=400, detail=str(e))
         except NoModelLoadedError as e:
             raise HTTPException(status_code=503, detail=str(e))
         except WorkerCommunicationError as e:
