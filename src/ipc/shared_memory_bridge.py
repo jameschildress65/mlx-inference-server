@@ -229,6 +229,10 @@ class SharedMemoryBridge:
         Returns:
             True if sent, False if buffer full
         """
+        # Defensive check: raise if bridge is closed
+        if self._closed:
+            raise SharedMemoryIPCError("Bridge is closed")
+
         return self._write_ring(
             self.req_header, self.req_data, data, self.req_sem
         )
@@ -243,6 +247,10 @@ class SharedMemoryBridge:
         Returns:
             JSON-encoded message bytes or None on timeout
         """
+        # Defensive check: raise if bridge is closed
+        if self._closed:
+            raise SharedMemoryIPCError("Bridge is closed")
+
         return self._read_ring_blocking(
             self.req_header, self.req_data, timeout, self.req_sem
         )
@@ -257,6 +265,10 @@ class SharedMemoryBridge:
         Returns:
             True if sent, False if buffer full
         """
+        # Defensive check: raise if bridge is closed
+        if self._closed:
+            raise SharedMemoryIPCError("Bridge is closed")
+
         return self._write_ring(
             self.resp_header, self.resp_data, data, self.resp_sem
         )
@@ -271,6 +283,10 @@ class SharedMemoryBridge:
         Returns:
             JSON-encoded message bytes or None on timeout
         """
+        # Defensive check: raise if bridge is closed
+        if self._closed:
+            raise SharedMemoryIPCError("Bridge is closed")
+
         return self._read_ring_blocking(
             self.resp_header, self.resp_data, timeout, self.resp_sem
         )
@@ -290,6 +306,10 @@ class SharedMemoryBridge:
         Raises:
             ValueError: If image too large or buffer full
         """
+        # Defensive check: raise if bridge is closed
+        if self._closed:
+            raise SharedMemoryIPCError("Bridge is closed")
+
         data_len = len(data)
 
         # Validate image size (10MB limit per plan)
@@ -568,16 +588,13 @@ class SharedMemoryBridge:
 
         # PHASE 2: Release memoryview references before closing shared memory
         # This prevents "cannot close exported pointers exist" errors
-        if hasattr(self, 'req_header'):
-            del self.req_header
-        if hasattr(self, 'req_data'):
-            del self.req_data
-        if hasattr(self, 'resp_header'):
-            del self.resp_header
-        if hasattr(self, 'resp_data'):
-            del self.resp_data
-        if hasattr(self, 'image_buffer'):
-            del self.image_buffer
+        # Make deletion idempotent with try/except for safety
+        for attr in ['req_header', 'req_data', 'resp_header', 'resp_data', 'image_buffer']:
+            try:
+                if hasattr(self, attr):
+                    delattr(self, attr)
+            except Exception:
+                pass  # Already deleted or never existed
 
         # Clean up POSIX semaphores (Production-grade resource management)
         if hasattr(self, 'req_sem'):

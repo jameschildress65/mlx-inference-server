@@ -790,14 +790,16 @@ class WorkerManager:
             self._registry.terminate_worker(worker_pid, timeout=2.0)
 
             # PHASE 2: Clean up shared memory bridge
-            if self._shmem_bridge:
+            # Set to None BEFORE close() to prevent race conditions
+            bridge = self._shmem_bridge
+            self._shmem_bridge = None
+
+            if bridge:
                 try:
-                    self._shmem_bridge.close()
+                    bridge.close()
                     self.logger.debug("Shared memory cleaned up")
                 except Exception as e:
                     self.logger.warning(f"Failed to clean up shared memory: {e}")
-                finally:
-                    self._shmem_bridge = None
 
     def _cleanup_dead_worker(self) -> None:
         """Clean up state after worker died unexpectedly."""
@@ -809,14 +811,16 @@ class WorkerManager:
             self._registry.unregister_worker(worker_pid)
 
         # PHASE 2: Clean up shared memory
-        if self._shmem_bridge:
+        # Set to None BEFORE close() to prevent race conditions
+        bridge = self._shmem_bridge
+        self._shmem_bridge = None
+
+        if bridge:
             try:
-                self._shmem_bridge.close()
+                bridge.close()
                 self.logger.debug("Shared memory cleaned up")
             except Exception as e:
                 self.logger.warning(f"Failed to clean up shared memory: {e}")
-            finally:
-                self._shmem_bridge = None
 
         self.active_worker = None
         self.active_model_name = None
