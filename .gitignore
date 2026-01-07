@@ -81,8 +81,10 @@ docs/PHASE3-*.md           # Phase documentation
 docs/DEPLOYMENT-*.md       # Internal deployment notes
 docs/PERFORMANCE-*.md      # Internal performance notes
 docs/VLM-MODEL-RECOMMENDATIONS.md  # Internal model testing
+docs/TESTED-AND-REJECTED.md  # Tested and rejected optimization approaches
 docs/benchmarks/           # Internal benchmark results
 docs/opus-reviews/           # Opus code reviews (internal)
+docs/analysis/             # Internal test/monitoring data
 
 # Temporary analysis files
 mls_request_analysis*.txt
