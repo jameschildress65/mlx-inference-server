@@ -3,19 +3,27 @@
 
 ---
 
-## Your Hardware
+## Hardware Requirements
 
-✅ **MacBook Pro M1 Pro (14-inch, 32GB RAM)**
-- CPU: 10-core (8 performance + 2 efficiency)
-- GPU: 16-core
-- Memory: 32 GB unified
-- Memory Bandwidth: ~200 GB/s
+**Supported:**
+- Apple Silicon Mac (M1/M2/M3/M4 - any variant)
+- 16GB+ RAM (32GB+ recommended for 7B+ models)
+- macOS 13.0+ (Ventura or newer)
 
-**Expected Performance (7B-4bit model):**
-- Estimated: 30-40 tokens/second
-- Better than M4 Air (17 tok/s)
-- Not quite M4 Max (94 tok/s)
-- **Sweet spot: 0.5B-14B models**
+**Performance by chip (7B-4bit model):**
+
+| Chip | Expected Speed | Max Recommended Model |
+|------|----------------|----------------------|
+| M1 | 20-30 tok/s | 14B |
+| M1 Pro/Max | 30-45 tok/s | 32B |
+| M2 | 25-35 tok/s | 14B |
+| M2 Pro/Max | 35-50 tok/s | 32B |
+| M3 | 30-40 tok/s | 14B |
+| M3 Pro/Max | 40-60 tok/s | 32B |
+| M4 | 35-45 tok/s | 14B |
+| M4 Pro/Max | 50-95 tok/s | 72B |
+
+**Note:** Performance depends on RAM, thermal conditions, and background load.
 
 ---
 
@@ -218,7 +226,7 @@ All three should succeed.
 
 ### Step 5: Understanding Models
 
-**Model size guide for your 32GB RAM:**
+**Model size guide (32GB RAM example):**
 
 | Model Size | Memory Usage | Speed Estimate | Recommendation |
 |------------|--------------|----------------|----------------|
@@ -311,9 +319,7 @@ curl http://localhost:11440/health
 
 #### Test 2: Load a Model
 ```bash
-curl -X POST http://localhost:11441/admin/load \
-  -H "Content-Type: application/json" \
-  -d '{"model_name":"mlx-community/Qwen2.5-7B-Instruct-4bit"}'
+curl -X POST "http://localhost:11441/admin/load?model_path=mlx-community/Qwen2.5-7B-Instruct-4bit"
 ```
 
 **Expected output:**
@@ -418,7 +424,7 @@ chmod +x /tmp/test_performance.sh
 /tmp/test_performance.sh
 ```
 
-**Expected results for M1 Pro 32GB:**
+**Example output (results vary by hardware):**
 ```
 Performance Test: 100-token generation
 
@@ -426,17 +432,15 @@ Run 1:
   Time: 3.2s, Tokens: 98, Speed: 30.6 tok/s
 Run 2:
   Time: 3.1s, Tokens: 100, Speed: 32.2 tok/s
-Run 3:
-  Time: 3.0s, Tokens: 97, Speed: 32.3 tok/s
-Run 4:
-  Time: 3.1s, Tokens: 99, Speed: 31.9 tok/s
-Run 5:
-  Time: 3.2s, Tokens: 101, Speed: 31.5 tok/s
+...
 ```
 
-**Typical range: 28-35 tok/s for 7B-4bit**
+**Typical ranges for 7B-4bit:**
+- M1/M2 base: 20-30 tok/s
+- M1/M2/M3 Pro/Max: 30-50 tok/s
+- M4 Pro/Max: 50-95 tok/s
 
-If you're seeing this range, **everything is working perfectly!**
+If you're seeing speeds in these ranges for your chip, **everything is working!**
 
 ---
 
@@ -484,9 +488,7 @@ huggingface-cli download mlx-community/Qwen2.5-7B-Instruct-4bit
 **You're trying too large a model.** Switch to smaller:
 ```bash
 curl -X POST http://localhost:11441/admin/unload  # Unload current
-curl -X POST http://localhost:11441/admin/load \
-  -H "Content-Type: application/json" \
-  -d '{"model_name":"mlx-community/Qwen2.5-3B-Instruct-4bit"}'
+curl -X POST "http://localhost:11441/admin/load?model_path=mlx-community/Qwen2.5-3B-Instruct-4bit"
 ```
 
 ### Issue 6: Slow performance (<10 tok/s)
@@ -586,9 +588,7 @@ Press `Ctrl+C` in the server terminal window
 
 ### Load Model
 ```bash
-curl -X POST http://localhost:11441/admin/load \
-  -H "Content-Type: application/json" \
-  -d '{"model_name":"mlx-community/Qwen2.5-7B-Instruct-4bit"}'
+curl -X POST "http://localhost:11441/admin/load?model_path=mlx-community/Qwen2.5-7B-Instruct-4bit"
 ```
 
 ### Unload Model
@@ -614,16 +614,17 @@ curl -X POST http://localhost:11440/v1/chat/completions \
 
 ---
 
-## Expected Performance (M1 Pro 32GB)
+## Expected Performance
 
-| Model | Memory | Speed | Best For |
-|-------|--------|-------|----------|
-| 0.5B-4bit | 260 MB | 150-200 tok/s | Quick tasks |
-| 3B-4bit | 1.9 GB | 60-80 tok/s | Good balance |
-| 7B-4bit | 4.1 GB | 28-38 tok/s | **Recommended** |
-| 14B-4bit | 8.2 GB | 15-20 tok/s | Best quality |
+| Model | Memory | Speed Range | Best For |
+|-------|--------|-------------|----------|
+| 0.5B-4bit | 260 MB | 100-200 tok/s | Quick tasks, testing |
+| 3B-4bit | 1.9 GB | 50-100 tok/s | Good balance |
+| 7B-4bit | 4.1 GB | 20-50 tok/s | **Recommended starting point** |
+| 14B-4bit | 8.2 GB | 10-30 tok/s | Better quality |
+| 32B-4bit | 18 GB | 5-20 tok/s | High quality (needs 32GB+ RAM) |
 
-**Your sweet spot: 7B models (30-40 tok/s is excellent for development)**
+**Recommendation:** Start with 7B-4bit for a good balance of speed and quality.
 
 ---
 
