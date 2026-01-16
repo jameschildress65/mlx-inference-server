@@ -97,9 +97,148 @@ fi
 
 echo ""
 
+# Configure model cache location (HF_HOME)
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${YELLOW}Step 2: Configure Model Storage${NC}"
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+echo ""
+echo "Models can be large (4-20GB each). Where should they be stored?"
+echo ""
+
+# Check if HF_HOME is already set
+if [ -n "$HF_HOME" ]; then
+    echo -e "${GREEN}✓ HF_HOME already set: $HF_HOME${NC}"
+    echo ""
+    echo "  ${GREEN}1)${NC} Keep current setting"
+    echo "  ${YELLOW}2)${NC} Change to different location"
+    echo ""
+    read -p "Enter choice [1-2]: " hf_choice
+
+    if [ "$hf_choice" = "2" ]; then
+        HF_HOME=""  # Reset to trigger new selection
+    fi
+fi
+
+if [ -z "$HF_HOME" ]; then
+    DEFAULT_CACHE="$HOME/.cache/huggingface"
+
+    echo "  ${GREEN}1)${NC} Default: $DEFAULT_CACHE (Recommended)"
+    echo "  ${YELLOW}2)${NC} Custom location (external drive, etc.)"
+    echo ""
+    read -p "Enter choice [1-2]: " hf_choice
+
+    case $hf_choice in
+        1)
+            HF_HOME="$DEFAULT_CACHE"
+            echo -e "${GREEN}→ Using default: $HF_HOME${NC}"
+            ;;
+        2)
+            echo ""
+            read -p "Enter full path for model storage: " custom_path
+            # Expand ~ if used
+            custom_path="${custom_path/#\~/$HOME}"
+
+            # Validate path exists or can be created
+            if [ -d "$custom_path" ]; then
+                HF_HOME="$custom_path"
+                echo -e "${GREEN}→ Using: $HF_HOME${NC}"
+            else
+                echo "  Directory doesn't exist. Create it? [y/n]: "
+                read create_dir
+                if [ "$create_dir" = "y" ] || [ "$create_dir" = "Y" ]; then
+                    mkdir -p "$custom_path"
+                    HF_HOME="$custom_path"
+                    echo -e "${GREEN}→ Created and using: $HF_HOME${NC}"
+                else
+                    echo -e "${YELLOW}→ Using default instead: $DEFAULT_CACHE${NC}"
+                    HF_HOME="$DEFAULT_CACHE"
+                fi
+            fi
+            ;;
+        *)
+            HF_HOME="$DEFAULT_CACHE"
+            echo -e "${GREEN}→ Using default: $HF_HOME${NC}"
+            ;;
+    esac
+fi
+
+# Ensure HF_HOME directory exists
+mkdir -p "$HF_HOME"
+
+# Export for this session
+export HF_HOME="$HF_HOME"
+
+# Check if already in shell config
+SHELL_CONFIG="$HOME/.zshrc"
+if grep -q "export HF_HOME=" "$SHELL_CONFIG" 2>/dev/null; then
+    echo -e "${GREEN}✓ HF_HOME already in $SHELL_CONFIG${NC}"
+else
+    echo ""
+    echo "Add HF_HOME to your shell config for future sessions? [y/n]: "
+    read add_to_shell
+    if [ "$add_to_shell" = "y" ] || [ "$add_to_shell" = "Y" ]; then
+        echo "" >> "$SHELL_CONFIG"
+        echo "# MLX Inference Server - Model cache location" >> "$SHELL_CONFIG"
+        echo "export HF_HOME=\"$HF_HOME\"" >> "$SHELL_CONFIG"
+        echo -e "${GREEN}✓ Added to $SHELL_CONFIG${NC}"
+    fi
+fi
+
+echo ""
+
+# Select starter model
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${YELLOW}Step 3: Download Starter Model${NC}"
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+echo ""
+echo "Download a model now? (Can also download later on first use)"
+echo ""
+echo "  ${GREEN}1)${NC} Qwen2.5-3B-Instruct-4bit (~1.9GB, fast download, good for testing)"
+echo "  ${YELLOW}2)${NC} Qwen2.5-7B-Instruct-4bit (~4.1GB, recommended for regular use)"
+echo "  ${BLUE}3)${NC} Skip (download on first use)"
+echo ""
+read -p "Enter choice [1-3]: " model_choice
+
+DOWNLOAD_MODEL=""
+case $model_choice in
+    1)
+        DOWNLOAD_MODEL="mlx-community/Qwen2.5-3B-Instruct-4bit"
+        echo -e "${GREEN}→ Will download 3B model${NC}"
+        ;;
+    2)
+        DOWNLOAD_MODEL="mlx-community/Qwen2.5-7B-Instruct-4bit"
+        echo -e "${GREEN}→ Will download 7B model${NC}"
+        ;;
+    3|*)
+        echo -e "${BLUE}→ Skipping model download${NC}"
+        ;;
+esac
+
+# Download model if selected (before venv setup so user sees progress)
+if [ -n "$DOWNLOAD_MODEL" ]; then
+    echo ""
+    echo "  → Downloading $DOWNLOAD_MODEL..."
+    echo "  → This may take a few minutes depending on your connection"
+    echo ""
+
+    # Use huggingface-cli if available, otherwise will download on first use
+    if command -v huggingface-cli &> /dev/null; then
+        huggingface-cli download "$DOWNLOAD_MODEL" --quiet
+        echo -e "${GREEN}  ✓ Model downloaded to $HF_HOME${NC}"
+    else
+        # Will install huggingface-hub in venv later, download then
+        echo -e "${YELLOW}  → huggingface-cli not found, will download after venv setup${NC}"
+        DOWNLOAD_AFTER_VENV=true
+    fi
+fi
+
+echo ""
+
 # Check current installation status
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Step 2: Checking Current Installation${NC}"
+echo -e "${YELLOW}Step 4: Checking Current Installation${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 SERVER_RUNNING=false
@@ -178,7 +317,7 @@ echo ""
 # Stop server if running
 if [ "$SERVER_RUNNING" = true ]; then
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${YELLOW}Step 3: Stopping Existing Server${NC}"
+    echo -e "${YELLOW}Step 5: Stopping Existing Server${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
     ./bin/mlx-inference-server-daemon.sh stop
@@ -199,7 +338,7 @@ fi
 if [ "$INSTALL_MODE" = "clean" ]; then
     if [ "$VENV_EXISTS" = true ] || [ "$VENV_VISION_EXISTS" = true ]; then
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${YELLOW}Step 4: Removing Old Virtual Environments${NC}"
+        echo -e "${YELLOW}Step 6: Removing Old Virtual Environments${NC}"
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
         if [ "$VENV_EXISTS" = true ]; then
@@ -220,7 +359,7 @@ fi
 
 # Install main venv
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Step 5: Setting Up Main Virtual Environment${NC}"
+echo -e "${YELLOW}Step 7: Setting Up Main Virtual Environment${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 if [ ! -d "venv" ] || [ "$INSTALL_MODE" = "clean" ]; then
@@ -254,9 +393,28 @@ deactivate
 echo -e "${GREEN}✓ Main venv ready${NC}"
 echo ""
 
+# Download model if deferred from earlier
+if [ "$DOWNLOAD_AFTER_VENV" = true ] && [ -n "$DOWNLOAD_MODEL" ]; then
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}Downloading Selected Model${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo "  → Downloading $DOWNLOAD_MODEL..."
+    echo "  → This may take a few minutes..."
+    echo ""
+
+    source venv/bin/activate
+    pip install huggingface-hub -q
+    huggingface-cli download "$DOWNLOAD_MODEL"
+    deactivate
+
+    echo -e "${GREEN}  ✓ Model downloaded to $HF_HOME${NC}"
+    echo ""
+fi
+
 # Install vision venv
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Step 6: Setting Up Vision Virtual Environment${NC}"
+echo -e "${YELLOW}Step 8: Setting Up Vision Virtual Environment${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 if [ ! -d "venv-vision" ] || [ "$INSTALL_MODE" = "clean" ]; then
@@ -292,7 +450,7 @@ echo ""
 
 # Start server
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Step 7: Starting Server${NC}"
+echo -e "${YELLOW}Step 9: Starting Server${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 ./bin/mlx-inference-server-daemon.sh start
@@ -324,17 +482,20 @@ echo ""
 
 # Test text inference
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Step 8: Testing Text Inference${NC}"
+echo -e "${YELLOW}Step 10: Testing Text Inference${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
+# Use downloaded model if available, otherwise use small 0.5B for quick test
+TEST_MODEL="${DOWNLOAD_MODEL:-mlx-community/Qwen2.5-0.5B-Instruct-4bit}"
+echo "  → Testing with: $TEST_MODEL"
 echo "  → Sending test request..."
 RESPONSE=$(curl -s -X POST http://localhost:11440/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
-    "messages": [{"role": "user", "content": "Say hello in 3 words"}],
-    "max_tokens": 10
-  }' 2>/dev/null)
+  -d "{
+    \"model\": \"$TEST_MODEL\",
+    \"messages\": [{\"role\": \"user\", \"content\": \"Say hello in 3 words\"}],
+    \"max_tokens\": 10
+  }" 2>/dev/null)
 
 if [[ "$RESPONSE" == *"assistant"* ]]; then
     TOKENS_PER_SEC=$(echo "$RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin)['usage'].get('tokens_per_sec', 'N/A'))" 2>/dev/null || echo "N/A")
@@ -351,7 +512,7 @@ echo ""
 
 # Test ProcessRegistry (robust)
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Step 9: Testing robust ProcessRegistry${NC}"
+echo -e "${YELLOW}Step 11: Testing ProcessRegistry${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 # Test 1: Registry initialization
@@ -364,8 +525,8 @@ else
 fi
 
 # Test 2: Worker registration
-echo "  → Testing worker registration..."
-curl -s -X POST "http://localhost:11441/admin/load?model_path=mlx-community/Qwen2.5-7B-Instruct-4bit" > /dev/null
+echo "  → Testing worker registration with: $TEST_MODEL"
+curl -s -X POST "http://localhost:11441/admin/load?model_path=$TEST_MODEL" > /dev/null
 sleep 5
 
 if [ -f "/tmp/mlx-server/worker_registry.json" ]; then
@@ -430,6 +591,10 @@ echo ""
 echo -e "${CYAN}Installation Summary:${NC}"
 echo -e "  ${GREEN}✓${NC} Main venv installed ($(du -sh venv 2>/dev/null | awk '{print $1}'))"
 echo -e "  ${GREEN}✓${NC} Vision venv installed ($(du -sh venv-vision 2>/dev/null | awk '{print $1}'))"
+echo -e "  ${GREEN}✓${NC} Model cache: $HF_HOME"
+if [ -n "$DOWNLOAD_MODEL" ]; then
+    echo -e "  ${GREEN}✓${NC} Model downloaded: $DOWNLOAD_MODEL"
+fi
 echo -e "  ${GREEN}✓${NC} Server running (PID: $(pgrep -f mlx-inference-server))"
 echo -e "  ${GREEN}✓${NC} Text inference tested ($TOKENS_PER_SEC tok/s)"
 echo ""
