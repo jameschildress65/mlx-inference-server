@@ -14,26 +14,40 @@
 
 ---
 
-## Installation (5 commands)
+## Installation
+
+**Recommended location:** `~/projects/` (avoid iCloud-synced folders - models are large)
 
 ```bash
-# 1. Install dependencies
+# 1. Install dependencies (skip if already installed)
 brew install pyenv git
 
-# 2. Install Python 3.12
+# 2. Configure pyenv for your shell (one-time setup)
+echo 'export PYENV_ROOT="$HOME/.pyenv"' >> ~/.zshrc
+echo '[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"' >> ~/.zshrc
+echo 'eval "$(pyenv init -)"' >> ~/.zshrc
+source ~/.zshrc
+
+# 3. Install Python 3.12
 pyenv install 3.12.7
 pyenv global 3.12.7
 
-# 3. Clone and enter directory
+# 4. Clone and enter directory
+mkdir -p ~/projects && cd ~/projects
 git clone https://github.com/jameschildress65/mlx-inference-server.git
 cd mlx-inference-server
 
-# 4. Create virtual environment
+# 5. Create virtual environment
 python -m venv venv
 source venv/bin/activate
 
-# 5. Install requirements
+# 6. Install requirements
 pip install -r requirements.txt
+```
+
+**Verify Python is correct before step 5:**
+```bash
+which python  # Should show: ~/.pyenv/versions/3.12.7/bin/python
 ```
 
 ---
