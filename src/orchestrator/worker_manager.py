@@ -314,7 +314,7 @@ class WorkerManager:
 
         self.logger.debug(f"Model path validation passed: {model_path}")
 
-    def load_model(self, model_path: str, timeout: int = 120) -> ModelLoadResult:
+    def load_model(self, model_path: str, timeout: Optional[int] = None) -> ModelLoadResult:
         """
         Spawn new worker subprocess for model.
 
@@ -326,7 +326,7 @@ class WorkerManager:
 
         Args:
             model_path: HuggingFace model path (e.g., "mlx-community/Qwen2.5-7B-Instruct-4bit")
-            timeout: Max seconds to wait for ready signal
+            timeout: Max seconds to wait for ready signal (default: from config)
 
         Returns:
             ModelLoadResult with load_time, memory_gb, model_name
@@ -339,6 +339,10 @@ class WorkerManager:
         # Race scenario: Model loads (5s), idle monitor fires during load, sees stale
         # last_activity_time, unloads model before request can start
         self._update_activity()
+
+        # Use config timeout if not explicitly provided
+        if timeout is None:
+            timeout = self.config.model_load_timeout_seconds
 
         with self.lock:
             start_time = time.time()

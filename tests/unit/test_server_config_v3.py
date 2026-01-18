@@ -86,7 +86,8 @@ class TestServerConfigMachineDetection:
 
         assert config.machine_type == "high-memory"
         assert config.total_ram_gb == 128
-        assert config.idle_timeout_seconds == 600
+        assert config.idle_timeout_seconds == 600  # 10 minutes for high-memory
+        assert config.model_load_timeout_seconds == 300  # 5 minutes for high-memory
         assert config.cache_dir  # Just verify cache_dir is set
 
     @patch.dict(os.environ, {}, clear=True)
@@ -105,7 +106,8 @@ class TestServerConfigMachineDetection:
 
         assert config.machine_type == "medium-memory"
         assert config.total_ram_gb == 32
-        assert config.idle_timeout_seconds == 180
+        assert config.idle_timeout_seconds == 300  # 5 minutes for medium-memory
+        assert config.model_load_timeout_seconds == 180  # 3 minutes for medium-memory
 
     @patch.dict(os.environ, {}, clear=True)
     @patch('src.config.server_config.ServerConfig._get_ram_gb')
@@ -121,7 +123,8 @@ class TestServerConfigMachineDetection:
 
         assert config.machine_type == "low-memory"
         assert config.total_ram_gb == 16
-        assert config.idle_timeout_seconds == 120
+        assert config.idle_timeout_seconds == 180  # 3 minutes for low-memory
+        assert config.model_load_timeout_seconds == 120  # 2 minutes for low-memory
 
     @patch.dict(os.environ, {}, clear=True)
     @patch('src.config.server_config.ServerConfig._get_ram_gb')
@@ -197,6 +200,7 @@ class TestServerConfigDataclass:
             host="0.0.0.0",
             idle_timeout_seconds=180,
             request_timeout_seconds=300,
+            model_load_timeout_seconds=120,
             memory_threshold_gb=28,
             cache_dir="/test/cache",
             log_dir="/test/logs",
@@ -211,4 +215,5 @@ class TestServerConfigDataclass:
         assert config.admin_port == 11441
         assert config.host == "0.0.0.0"
         assert config.idle_timeout_seconds == 180
+        assert config.model_load_timeout_seconds == 120
         assert config.machine_type == "test"

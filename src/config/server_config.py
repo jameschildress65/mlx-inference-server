@@ -45,6 +45,7 @@ class ServerConfig:
     # Timeouts (seconds)
     idle_timeout_seconds: int
     request_timeout_seconds: int
+    model_load_timeout_seconds: int
 
     # Memory (GB)
     memory_threshold_gb: int
@@ -167,6 +168,7 @@ class ServerConfig:
             return "high-memory", {
                 "idle_timeout_seconds": 600,      # 10 minutes
                 "request_timeout_seconds": 600,   # 10 minutes (long contexts)
+                "model_load_timeout_seconds": 300,  # 5 minutes (supports 32B+ models)
                 "memory_threshold_gb": ram_gb - 20,  # Leave 20GB for system
                 "cache_dir": default_cache,
                 "description": f"High-memory configuration ({ram_gb}GB RAM)"
@@ -177,6 +179,7 @@ class ServerConfig:
             return "medium-memory", {
                 "idle_timeout_seconds": 300,      # 5 minutes
                 "request_timeout_seconds": 300,   # 5 minutes
+                "model_load_timeout_seconds": 180,  # 3 minutes (supports 14B models)
                 "memory_threshold_gb": ram_gb - 8,  # Leave 8GB for system
                 "cache_dir": default_cache,
                 "description": f"Medium-memory configuration ({ram_gb}GB RAM)"
@@ -187,6 +190,7 @@ class ServerConfig:
             return "low-memory", {
                 "idle_timeout_seconds": 180,      # 3 minutes
                 "request_timeout_seconds": 180,   # 3 minutes
+                "model_load_timeout_seconds": 120,  # 2 minutes (small models only)
                 "memory_threshold_gb": max(8, ram_gb - 4),  # Leave 4GB for system
                 "cache_dir": default_cache,
                 "description": f"Low-memory configuration ({ram_gb}GB RAM)"
@@ -207,6 +211,7 @@ class ServerConfig:
         Environment variable overrides:
         - MLX_IDLE_TIMEOUT: Override idle timeout (seconds)
         - MLX_REQUEST_TIMEOUT: Override request timeout (seconds)
+        - MLX_MODEL_LOAD_TIMEOUT: Override model load timeout (seconds)
         - MLX_ADMIN_PORT: Override admin port (default: 11441)
         - HF_HOME: Override model cache directory
         - MLX_LOG_DIR: Override log directory
@@ -241,6 +246,9 @@ class ServerConfig:
         request_timeout = int(
             os.getenv("MLX_REQUEST_TIMEOUT", str(default_config["request_timeout_seconds"]))
         )
+        model_load_timeout = int(
+            os.getenv("MLX_MODEL_LOAD_TIMEOUT", str(default_config["model_load_timeout_seconds"]))
+        )
         admin_port = int(os.getenv("MLX_ADMIN_PORT", "11441"))  # V3 Admin API port
         cache_dir = os.getenv("HF_HOME", default_config["cache_dir"])
         log_dir = os.getenv(
@@ -259,6 +267,7 @@ class ServerConfig:
             host="0.0.0.0",
             idle_timeout_seconds=idle_timeout,
             request_timeout_seconds=request_timeout,
+            model_load_timeout_seconds=model_load_timeout,
             memory_threshold_gb=default_config["memory_threshold_gb"],
             cache_dir=cache_dir,
             log_dir=log_dir,
@@ -306,6 +315,7 @@ Network:
 Timeouts:
   Idle Timeout:     {self.idle_timeout_seconds}s ({self.idle_timeout_seconds/60:.1f} min)
   Request Timeout:  {self.request_timeout_seconds}s
+  Model Load:       {self.model_load_timeout_seconds}s ({self.model_load_timeout_seconds/60:.1f} min)
 
 Memory:
   Threshold:        {self.memory_threshold_gb} GB
@@ -330,6 +340,7 @@ Paths:
             "host": self.host,
             "idle_timeout_seconds": self.idle_timeout_seconds,
             "request_timeout_seconds": self.request_timeout_seconds,
+            "model_load_timeout_seconds": self.model_load_timeout_seconds,
             "memory_threshold_gb": self.memory_threshold_gb,
             "cache_dir": self.cache_dir,
             "log_dir": self.log_dir,
