@@ -7,6 +7,8 @@ import re
 import threading
 import time
 import logging
+from contextlib import contextmanager
+from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any, Set
 from pathlib import Path
 
@@ -56,26 +58,22 @@ class NoModelLoadedError(WorkerError):
     pass
 
 
+@dataclass
 class ModelLoadResult:
     """Result of model load operation."""
-    def __init__(self, model_name: str, memory_gb: float, load_time: float):
-        self.model_name = model_name
-        self.memory_gb = memory_gb
-        self.load_time = load_time
+    model_name: str
+    memory_gb: float
+    load_time: float
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "model_name": self.model_name,
-            "memory_gb": self.memory_gb,
-            "load_time": self.load_time
-        }
+        return asdict(self)
 
 
+@dataclass
 class UnloadResult:
     """Result of model unload operation."""
-    def __init__(self, model_name: str, memory_freed_gb: float):
-        self.model_name = model_name
-        self.memory_freed_gb = memory_freed_gb
+    model_name: str
+    memory_freed_gb: float
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -226,6 +224,41 @@ class WorkerManager:
 
         # Future multi-worker implementation will replace above with:
         # return self._get_next_healthy_worker_from_pool(model_name)
+
+    def _verify_worker_alive_locked(self, model_name: str) -> None:
+        """
+        Verify worker is available and alive (assumes self.lock held).
+
+        CRITICAL: Caller MUST hold self.lock before calling this method.
+
+        Args:
+            model_name: Model name for error messages
+
+        Raises:
+            NoModelLoadedError: If no worker active
+            WorkerError: If worker died unexpectedly
+
+        Thread-safety: Assumes caller holds self.lock
+        """
+        # Check worker availability
+        if self.active_worker is None:
+            raise NoModelLoadedError(
+                f"No worker available for model: {model_name}. "
+                f"Load model first via /v1/chat/completions or admin API."
+            )
+
+        # Health check: Verify worker is alive
+        if self.active_worker.poll() is not None:
+            returncode = self.active_worker.returncode
+            self.logger.error(
+                f"Worker process died (returncode: {returncode}). "
+                f"Model: {self.active_model_name}"
+            )
+            self._cleanup_dead_worker()
+            raise WorkerError(
+                f"Worker process died (exit code: {returncode}). "
+                f"Reload model required."
+            )
 
     # =========================================================================
     # IPC Abstraction Layer (PHASE 2: Shared Memory + Stdio Fallback)
@@ -613,31 +646,11 @@ class WorkerManager:
         """
         # DEADLOCK FIX: Track activity BEFORE acquiring main lock
         # Lock order: activity_lock → self.lock (matches unload_model_if_idle)
-        self._increment_active_requests()
-        self._update_activity()
-
-        try:
+        with self._track_request_activity():
             # Opus C1 Fix: Hold lock for entire operation to prevent worker lifecycle changes
             with self.lock:
-                # Check worker availability
-                if self.active_worker is None:
-                    raise NoModelLoadedError(
-                        f"No worker available for model: {request.model}. "
-                        f"Load model first via /v1/chat/completions or admin API."
-                    )
-
-                # Health check: Verify worker is alive
-                if self.active_worker.poll() is not None:
-                    returncode = self.active_worker.returncode
-                    self.logger.error(
-                        f"Worker process died (returncode: {returncode}). "
-                        f"Model: {self.active_model_name}"
-                    )
-                    self._cleanup_dead_worker()
-                    raise WorkerError(
-                        f"Worker process died (exit code: {returncode}). "
-                        f"Reload model required."
-                    )
+                # Verify worker is available and alive
+                self._verify_worker_alive_locked(request.model)
 
                 # Send request and receive response while holding lock
                 # This prevents worker from being unloaded/replaced mid-request
@@ -659,9 +672,6 @@ class WorkerManager:
                     "tokens": response.tokens,
                     "finish_reason": response.finish_reason
                 }
-        finally:
-            # Always decrement active requests (even on error)
-            self._decrement_active_requests()
 
     def generate_stream(self, request: CompletionRequest):
         """
@@ -694,31 +704,11 @@ class WorkerManager:
         """
         # DEADLOCK FIX: Track activity BEFORE acquiring main lock
         # Lock order: activity_lock → self.lock (matches unload_model_if_idle)
-        self._increment_active_requests()
-        self._update_activity()
-
-        try:
+        with self._track_request_activity():
             # Opus C1 Fix: Hold lock for entire operation to prevent worker lifecycle changes
             with self.lock:
-                # Check worker availability
-                if self.active_worker is None:
-                    raise NoModelLoadedError(
-                        f"No worker available for model: {request.model}. "
-                        f"Load model first via /v1/chat/completions or admin API."
-                    )
-
-                # Health check: Verify worker is alive
-                if self.active_worker.poll() is not None:
-                    returncode = self.active_worker.returncode
-                    self.logger.error(
-                        f"Worker process died (returncode: {returncode}). "
-                        f"Model: {self.active_model_name}"
-                    )
-                    self._cleanup_dead_worker()
-                    raise WorkerError(
-                        f"Worker process died (exit code: {returncode}). "
-                        f"Reload model required."
-                    )
+                # Verify worker is available and alive
+                self._verify_worker_alive_locked(request.model)
 
                 # Send request
                 self._send_message(request)
@@ -748,9 +738,6 @@ class WorkerManager:
                             break
                     else:
                         raise WorkerError(f"Expected 'stream_chunk', got '{chunk.type}'")
-        finally:
-            # Always decrement active requests (even on error)
-            self._decrement_active_requests()
 
     def health_check(self) -> Dict[str, Any]:
         """
@@ -1006,6 +993,29 @@ class WorkerManager:
         """Decrement active request counter."""
         with self.activity_lock:
             self.active_requests = max(0, self.active_requests - 1)
+
+    @contextmanager
+    def _track_request_activity(self):
+        """
+        Context manager for tracking request activity.
+
+        Automatically increments/decrements active request counter and
+        updates activity timestamp. Ensures decrement happens even on
+        exceptions (critical for idle monitoring accuracy).
+
+        Lock ordering: Acquires activity_lock internally (safe - always first).
+
+        Usage:
+            with self._track_request_activity():
+                with self.lock:
+                    # ... process request ...
+        """
+        self._increment_active_requests()
+        self._update_activity()
+        try:
+            yield
+        finally:
+            self._decrement_active_requests()
 
     def shutdown(self) -> None:
         """Shutdown worker manager (cleanup on server exit)."""
