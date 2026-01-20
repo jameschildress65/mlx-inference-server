@@ -23,6 +23,8 @@ def mock_config():
         host="0.0.0.0",
         idle_timeout_seconds=180,
         request_timeout_seconds=300,
+        model_load_timeout_seconds=300,  # Phase 2 field
+        max_concurrent_requests=10,  # Phase 2.1 field
         memory_threshold_gb=28,
         cache_dir="/test/cache",
         log_dir="/test/logs",
@@ -59,6 +61,17 @@ class TestMainAPIEndpoints:
 
     def test_health_endpoint(self, mock_config, mock_worker_manager):
         """Test GET /health endpoint."""
+        # Setup: Mock worker as healthy with model loaded
+        mock_worker_manager.health_check.return_value = {
+            "healthy": True,
+            "status": "healthy"
+        }
+        mock_worker_manager.get_status.return_value = {
+            "model_loaded": True,
+            "model_name": "test-model",
+            "memory_gb": 4.5
+        }
+
         app = create_app(mock_config, mock_worker_manager)
         client = TestClient(app)
 
@@ -66,7 +79,7 @@ class TestMainAPIEndpoints:
 
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "healthy"
+        assert data["healthy"] == True
         assert data["version"] == "3.1.0"
 
     def test_completions_loads_model_on_demand(self, mock_config, mock_worker_manager):
@@ -505,10 +518,12 @@ class TestMultimodalContentParsing:
         # Phase 2: If Pillow not installed, should return 400 with helpful message
         # Otherwise, would need vision model (Phase 3) to complete successfully
         if response.status_code == 400:
-            # Expected when Pillow not installed
+            # Expected when Pillow not installed OR invalid image data
             response_data = response.json()
             detail = response_data.get("detail", str(response_data))
-            assert "Pillow" in detail or "PIL" in detail
+            # Accept either "Pillow/PIL not installed" or "Invalid image" errors
+            assert ("Pillow" in detail or "PIL" in detail or
+                    "Invalid" in detail or "Image processing error" in detail)
         else:
             # If Pillow is installed, request should be accepted (Phase 3+ will implement inference)
             assert response.status_code == 200

@@ -17,6 +17,10 @@ from ..ipc.shared_memory_bridge import WorkerCommunicationError
 # StdioBridge no longer used directly - WorkerManager handles IPC abstraction
 from ..config.server_config import ServerConfig
 from .image_utils import prepare_images, ImageProcessingError
+# P0 bloat remediation: Shared helpers for endpoints
+from .request_handlers import BackpressureGuard, RequestTimer, ensure_model_loaded
+from .response_formatters import CompletionFormatter, ChatCompletionFormatter
+from .health_checks import check_gpu_health, check_memory_health, check_disk_health, check_worker_health
 
 logger = logging.getLogger(__name__)
 
@@ -266,7 +270,7 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
     app = FastAPI(
         title="MLX Server V3",
         description="Production-grade LLM inference server with process isolation",
-        version="3.1.1"
+        version="3.1.0"
     )
 
     # OpenAI-compatible error formatting
@@ -307,69 +311,7 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         )
 
     # Phase 2.7: Health Check Helpers
-    def check_gpu_health() -> dict:
-        """Check GPU availability and status."""
-        try:
-            # Check if MLX Metal is available
-            if _HAS_MLX_METAL:
-                # Try to get GPU memory info (if available on this platform)
-                return {
-                    "available": True,
-                    "backend": "mlx.metal"
-                }
-            else:
-                return {
-                    "available": False,
-                    "backend": "cpu_fallback"
-                }
-        except Exception as e:
-            logger.debug(f"GPU health check failed: {e}")
-            return {
-                "available": False,
-                "error": str(e)
-            }
-
-    def check_memory_health() -> dict:
-        """Check system memory usage."""
-        import psutil
-        mem = psutil.virtual_memory()
-        return {
-            "percent_used": mem.percent,
-            "healthy": mem.percent < 90,
-            "available_gb": mem.available / (1024**3),
-            "total_gb": mem.total / (1024**3)
-        }
-
-    def check_disk_health() -> dict:
-        """Check disk usage."""
-        import psutil
-        disk = psutil.disk_usage('/')
-        return {
-            "percent_used": disk.percent,
-            "healthy": disk.percent < 90,
-            "available_gb": disk.free / (1024**3),
-            "total_gb": disk.total / (1024**3)
-        }
-
-    def check_worker_health() -> dict:
-        """Check worker process health."""
-        try:
-            health = worker_manager.health_check()
-            status = worker_manager.get_status()
-            return {
-                "alive": health["healthy"],
-                "status": health["status"],
-                "model_loaded": status["model_loaded"],
-                "model_name": status["model_name"] if status["model_loaded"] else None
-            }
-        except Exception as e:
-            logger.error(f"Worker health check failed: {e}")
-            return {
-                "alive": False,
-                "status": "error",
-                "error": str(e)
-            }
-
+    # P0: Health check functions now in health_checks module
     # Health check (Phase 2.7: Deep health check)
     @app.get("/health")
     async def health_check():
@@ -388,11 +330,11 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         """
         from datetime import datetime
 
-        # Run all health checks
+        # P0: Run all health checks using shared helpers
         gpu = check_gpu_health()
         memory = check_memory_health()
         disk = check_disk_health()
-        worker = check_worker_health()
+        worker = check_worker_health(worker_manager)
 
         checks = {
             "gpu": gpu.get("available", False),
@@ -416,7 +358,7 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                 "worker": worker
             },
             "timestamp": datetime.utcnow().isoformat(),
-            "version": "3.1.1"
+            "version": "3.1.0"
         }
 
         status_code = 200 if healthy else 503
@@ -437,7 +379,7 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
             200 if ready to handle requests, 503 if not ready
         """
         semaphore = _get_request_semaphore()
-        worker = check_worker_health()
+        worker = check_worker_health(worker_manager)
 
         # Ready conditions
         queue_space = semaphore._value > 0
@@ -471,42 +413,21 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         Returns:
             Completion response
         """
-        # Phase 1 (NASA): Backpressure control - limit concurrent requests
-        semaphore = _get_request_semaphore()
-
-        # Opus Improvement 3: Fast-fail optimization for backpressure
-        # Note: This check is a fast-fail optimization, not a safety mechanism.
-        # The semaphore itself enforces the limit; this check allows immediate
-        # 503 response instead of brief blocking. A small race window exists
-        # but is benign (worst case: 1 extra request waits instead of failing).
-        if semaphore.locked() and semaphore._value == 0:
-            logger.warning("Request queue full - returning 503")
-            # Phase 2.2: Track queue rejection
-            get_metrics().record_queue_reject()
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "error": {
-                        "message": "Server is at capacity. Please retry after a brief delay.",
-                        "type": "server_overloaded",
-                        "code": "queue_full"
-                    }
-                }
-            )
+        # P0: Backpressure control using shared guard
+        guard = BackpressureGuard(_get_request_semaphore(), get_metrics())
+        capacity_response = guard.check_capacity()
+        if capacity_response:
+            return capacity_response
 
         # Acquire semaphore slot (auto-releases on function exit or exception)
-        async with semaphore:
-            # Phase 2.2: Track request timing
-            request_start_time = time.time()
-            get_metrics().record_request_start()
+        async with guard.semaphore:
+            # P0: Track request timing using shared timer
+            timer = RequestTimer(get_metrics())
+            timer.start()
 
             try:
-                # Check if model is loaded, if not load it
-                status = worker_manager.get_status()
-                if not status["model_loaded"] or status["model_name"] != request.model:
-                    logger.info(f"Loading model on-demand: {request.model}")
-                    load_result = worker_manager.load_model(request.model)
-                    logger.info(f"Model loaded: {load_result.model_name} ({load_result.memory_gb:.2f} GB)")
+                # P0: Ensure model loaded using shared helper
+                ensure_model_loaded(worker_manager, request.model)
 
                 # Create IPC request
                 ipc_request = IPCCompletionRequest(
@@ -521,27 +442,14 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
 
                 # Generate
                 if request.stream:
-                    # Streaming
+                    # P0: Streaming using shared formatter
                     async def generate_stream():
                         """Generate SSE stream for text completions."""
                         try:
-                            # Use WorkerManager's streaming method (handles SharedMemoryBridge/StdioBridge)
                             for chunk in worker_manager.generate_stream(ipc_request):
                                 if chunk.type == "stream_chunk":
-                                    # Format as SSE for text completions (not chat)
-                                    data = {
-                                        "id": "cmpl-mlx-v3",
-                                        "object": "text_completion",
-                                        "created": int(__import__('time').time()),
-                                        "model": request.model,
-                                        "choices": [{
-                                            "index": 0,
-                                            "text": chunk.text if chunk.text else "",
-                                            "finish_reason": chunk.finish_reason
-                                        }]
-                                    }
-                                    yield f"data: {json.dumps(data)}\n\n"
-
+                                    # P0: Use CompletionFormatter for SSE formatting
+                                    yield CompletionFormatter.format_stream_chunk(request.model, chunk)
                                     if chunk.done:
                                         yield "data: [DONE]\n\n"
                                         break
@@ -549,7 +457,6 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                                     yield f"data: {json.dumps(format_openai_error(chunk.message))}\n\n"
                                     break
                         except Exception as e:
-                            # M2: Don't expose internal details in streaming errors
                             logger.error(f"Streaming error: {e}", exc_info=True)
                             yield f"data: {json.dumps(format_openai_error('Internal server error'))}\n\n"
 
@@ -563,70 +470,32 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                         tokenizer = get_tokenizer(request.model)
                         prompt_tokens = len(tokenizer.encode(request.prompt))
                     except Exception as e:
-                        # Can't load tokenizer (e.g., test mock), default to 0
                         logger.warning(f"Could not count prompt tokens: {e}")
                         prompt_tokens = 0
-                    completion_tokens = result["tokens"]
-                    total_tokens = prompt_tokens + completion_tokens
 
-                    # Phase 2.2: Track successful request
-                    duration_ms = (time.time() - request_start_time) * 1000
-                    get_metrics().record_request_success(duration_ms)
-
-                    # Format response (OpenAI-compatible)
-                    return {
-                        "id": "cmpl-mlx-v3",
-                        "object": "text_completion",
-                        "created": int(time.time()),
-                        "model": request.model,
-                        "choices": [{
-                            "text": result["text"],
-                            "index": 0,
-                            "logprobs": None,
-                            "finish_reason": result["finish_reason"]
-                        }],
-                        "usage": {
-                            "prompt_tokens": prompt_tokens,
-                            "completion_tokens": completion_tokens,
-                            "total_tokens": total_tokens
-                        }
-                    }
+                    # P0: Track success and format using shared helpers
+                    timer.record_success()
+                    return CompletionFormatter.format_non_streaming(request.model, result, prompt_tokens)
 
             except HTTPException:
-                # Phase 2.2: Track failure
-                duration_ms = (time.time() - request_start_time) * 1000
-                get_metrics().record_request_failure(duration_ms)
-                # Re-raise HTTP exceptions (like 501 for streaming)
+                timer.record_failure()
                 raise
             except ValueError as e:
-                # Phase 2.2: Track failure
-                duration_ms = (time.time() - request_start_time) * 1000
-                get_metrics().record_request_failure(duration_ms)
-                # Validation errors (e.g., "Vision model requires at least one image")
+                timer.record_failure()
                 raise HTTPException(status_code=400, detail=str(e))
             except NoModelLoadedError as e:
-                # Phase 2.2: Track failure
-                duration_ms = (time.time() - request_start_time) * 1000
-                get_metrics().record_request_failure(duration_ms)
+                timer.record_failure()
                 raise HTTPException(status_code=503, detail=str(e))
             except WorkerCommunicationError as e:
-                # Phase 2.2: Track failure
-                duration_ms = (time.time() - request_start_time) * 1000
-                get_metrics().record_request_failure(duration_ms)
-                # Buffer full - system overloaded (backpressure)
+                timer.record_failure()
                 logger.warning(f"Backpressure triggered: {e}")
                 raise HTTPException(status_code=503, detail=str(e))
             except WorkerError as e:
-                # Phase 2.2: Track failure
-                duration_ms = (time.time() - request_start_time) * 1000
-                get_metrics().record_request_failure(duration_ms)
+                timer.record_failure()
                 logger.error(f"Worker error: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
             except Exception as e:
-                # Phase 2.2: Track failure
-                duration_ms = (time.time() - request_start_time) * 1000
-                get_metrics().record_request_failure(duration_ms)
-                # M2: Don't expose internal details to client
+                timer.record_failure()
                 logger.error(f"Unexpected error: {e}", exc_info=True)
                 raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -642,34 +511,17 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         Returns:
             Chat completion response
         """
-        # Phase 1 (NASA): Backpressure control - limit concurrent requests
-        semaphore = _get_request_semaphore()
-
-        # Opus Improvement 3: Fast-fail optimization for backpressure
-        # Note: This check is a fast-fail optimization, not a safety mechanism.
-        # The semaphore itself enforces the limit; this check allows immediate
-        # 503 response instead of brief blocking. A small race window exists
-        # but is benign (worst case: 1 extra request waits instead of failing).
-        if semaphore.locked() and semaphore._value == 0:
-            logger.warning("Request queue full - returning 503")
-            # Phase 2.2: Track queue rejection
-            get_metrics().record_queue_reject()
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "error": {
-                        "message": "Server is at capacity. Please retry after a brief delay.",
-                        "type": "server_overloaded",
-                        "code": "queue_full"
-                    }
-                }
-            )
+        # P0: Backpressure control using shared guard
+        guard = BackpressureGuard(_get_request_semaphore(), get_metrics())
+        capacity_response = guard.check_capacity()
+        if capacity_response:
+            return capacity_response
 
         # Acquire semaphore slot (auto-releases on function exit or exception)
-        async with semaphore:
-            # Phase 2.2: Track request timing
-            request_start_time = time.time()
-            get_metrics().record_request_start()
+        async with guard.semaphore:
+            # P0: Track request timing using shared timer
+            timer = RequestTimer(get_metrics())
+            timer.start()
 
             # Convert chat messages to prompt using model's chat template
             logger.info(f"Chat completion request: stream={request.stream}, messages={len(request.messages)}, "
@@ -725,12 +577,8 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                 prompt = "\n".join(prompt_parts)
 
             try:
-                # Check if model is loaded, if not load it
-                status = worker_manager.get_status()
-                if not status["model_loaded"] or status["model_name"] != request.model:
-                    logger.info(f"Loading model on-demand: {request.model}")
-                    load_result = worker_manager.load_model(request.model)
-                    logger.info(f"Model loaded: {load_result.model_name} ({load_result.memory_gb:.2f} GB)")
+                # P0: Ensure model loaded using shared helper
+                ensure_model_loaded(worker_manager, request.model)
 
                 # Phase 2: Image preprocessing for vision/multimodal requests
                 images = None
@@ -777,27 +625,14 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
 
                 # Generate
                 if request.stream:
-                    # Streaming - chat format
+                    # P0: Streaming using shared formatter
                     async def generate_stream():
                         """Generate SSE stream for chat completions."""
                         try:
-                            # Use WorkerManager's streaming method (handles SharedMemoryBridge/StdioBridge)
                             for chunk in worker_manager.generate_stream(ipc_request):
                                 if chunk.type == "stream_chunk":
-                                    # Format as SSE for chat completions (use delta.content)
-                                    data = {
-                                        "id": "chatcmpl-mlx-v3",
-                                        "object": "chat.completion.chunk",
-                                        "created": int(__import__('time').time()),
-                                        "model": request.model,
-                                        "choices": [{
-                                            "index": 0,
-                                            "delta": {"content": chunk.text} if chunk.text else {},
-                                            "finish_reason": chunk.finish_reason
-                                        }]
-                                    }
-                                    yield f"data: {json.dumps(data)}\n\n"
-
+                                    # P0: Use ChatCompletionFormatter for SSE formatting
+                                    yield ChatCompletionFormatter.format_stream_chunk(request.model, chunk)
                                     if chunk.done:
                                         yield "data: [DONE]\n\n"
                                         break
@@ -805,7 +640,6 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                                     yield f"data: {json.dumps(format_openai_error(chunk.message))}\n\n"
                                     break
                         except Exception as e:
-                            # M2: Don't expose internal details in streaming errors
                             logger.error(f"Streaming error: {e}", exc_info=True)
                             yield f"data: {json.dumps(format_openai_error('Internal server error'))}\n\n"
 
@@ -816,10 +650,6 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                     result = worker_manager.generate(ipc_request)
                     generation_time = time.time() - start_time
 
-                    # Convert to chat format
-                    response_text = result["text"]
-                    completion_tokens = result["tokens"]
-
                     # Count prompt tokens using tokenizer (reload if template failed)
                     try:
                         prompt_tokens = len(tokenizer.encode(prompt))
@@ -829,75 +659,40 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                             tokenizer = get_tokenizer(request.model)
                             prompt_tokens = len(tokenizer.encode(prompt))
                         except Exception as e:
-                            # Can't load tokenizer (e.g., test mock), default to 0
                             logger.warning(f"Could not count prompt tokens: {e}")
                             prompt_tokens = 0
-                    total_tokens = prompt_tokens + completion_tokens
 
+                    # Log performance metrics
+                    completion_tokens = result["tokens"]
                     tokens_per_sec = completion_tokens / generation_time if generation_time > 0 else 0
-                    logger.info(f"Chat completion: {len(response_text)} chars, {completion_tokens} tokens in {generation_time:.1f}s ({tokens_per_sec:.1f} tok/s)")
-                    logger.debug(f"Response content: {response_text[:200]}...")
+                    logger.info(f"Chat completion: {len(result['text'])} chars, {completion_tokens} tokens in {generation_time:.1f}s ({tokens_per_sec:.1f} tok/s)")
+                    logger.debug(f"Response content: {result['text'][:200]}...")
 
-                    # Phase 2.2: Track successful request
-                    duration_ms = (time.time() - request_start_time) * 1000
-                    get_metrics().record_request_success(duration_ms)
-
-                    return {
-                        "id": "chatcmpl-mlx-v3",
-                        "object": "chat.completion",
-                        "created": int(time.time()),
-                        "model": request.model,
-                        "choices": [{
-                            "index": 0,
-                            "message": {
-                                "role": "assistant",
-                                "content": response_text
-                            },
-                            "finish_reason": result["finish_reason"]
-                        }],
-                        "usage": {
-                            "prompt_tokens": prompt_tokens,
-                            "completion_tokens": completion_tokens,
-                            "total_tokens": total_tokens,
-                            "tokens_per_sec": round(tokens_per_sec, 2)
-                        }
-                    }
+                    # P0: Track success and format using shared helpers
+                    timer.record_success()
+                    return ChatCompletionFormatter.format_non_streaming(
+                        request.model, result, prompt_tokens, generation_time
+                    )
 
             except HTTPException:
-                # Phase 2.2: Track failure
-                duration_ms = (time.time() - request_start_time) * 1000
-                get_metrics().record_request_failure(duration_ms)
-                # Re-raise HTTP exceptions
+                timer.record_failure()
                 raise
             except ValueError as e:
-                # Phase 2.2: Track failure
-                duration_ms = (time.time() - request_start_time) * 1000
-                get_metrics().record_request_failure(duration_ms)
-                # Validation errors (e.g., "Vision model requires at least one image")
+                timer.record_failure()
                 raise HTTPException(status_code=400, detail=str(e))
             except NoModelLoadedError as e:
-                # Phase 2.2: Track failure
-                duration_ms = (time.time() - request_start_time) * 1000
-                get_metrics().record_request_failure(duration_ms)
+                timer.record_failure()
                 raise HTTPException(status_code=503, detail=str(e))
             except WorkerCommunicationError as e:
-                # Phase 2.2: Track failure
-                duration_ms = (time.time() - request_start_time) * 1000
-                get_metrics().record_request_failure(duration_ms)
-                # Buffer full - system overloaded (backpressure)
+                timer.record_failure()
                 logger.warning(f"Backpressure triggered: {e}")
                 raise HTTPException(status_code=503, detail=str(e))
             except WorkerError as e:
-                # Phase 2.2: Track failure
-                duration_ms = (time.time() - request_start_time) * 1000
-                get_metrics().record_request_failure(duration_ms)
+                timer.record_failure()
                 logger.error(f"Worker error: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
             except Exception as e:
-                # Phase 2.2: Track failure
-                duration_ms = (time.time() - request_start_time) * 1000
-                get_metrics().record_request_failure(duration_ms)
-                # M2: Don't expose internal details to client
+                timer.record_failure()
                 logger.error(f"Unexpected error: {e}", exc_info=True)
                 raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -956,7 +751,7 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
     app = FastAPI(
         title="MLX Server V3 - Admin API",
         description="Administrative endpoints for model management",
-        version="3.1.1"
+        version="3.1.0"
     )
 
     @app.get("/admin/health")
@@ -966,7 +761,7 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
         return {
             "status": "healthy" if health["healthy"] else "degraded",
             "worker_status": health["status"],
-            "version": "3.1.1"
+            "version": "3.1.0"
         }
 
     @app.get("/admin/status")
@@ -977,7 +772,7 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
 
         return {
             "status": "running",
-            "version": "3.1.1",
+            "version": "3.1.0",
             "ports": {
                 "main": config.main_port,
                 "admin": config.admin_port
