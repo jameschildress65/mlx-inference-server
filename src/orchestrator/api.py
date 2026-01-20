@@ -1,7 +1,9 @@
 """FastAPI application for MLX Server V3."""
 
+import asyncio
 import logging
 import json
+from asyncio import Semaphore
 from functools import lru_cache
 from typing import Dict, Any, Optional, Union, Literal
 from fastapi import FastAPI, HTTPException
@@ -16,6 +18,22 @@ from ..config.server_config import ServerConfig
 from .image_utils import prepare_images, ImageProcessingError
 
 logger = logging.getLogger(__name__)
+
+# Phase 1 (NASA): Request queue depth control - backpressure mechanism
+# Opus 4.5 recommendation: Limit concurrent requests to prevent worker overload
+_request_semaphore: Optional[Semaphore] = None
+_max_queue_depth = 10  # Conservative: limits concurrent requests to single worker
+
+def _get_request_semaphore() -> Semaphore:
+    """Get or create the request semaphore for backpressure control.
+
+    Lazy initialization ensures semaphore is created in the correct event loop.
+    Returns HTTP 503 when queue is full instead of crashing worker.
+    """
+    global _request_semaphore
+    if _request_semaphore is None:
+        _request_semaphore = Semaphore(_max_queue_depth)
+    return _request_semaphore
 
 # Phase 1.1: Tokenizer cache - avoid reloading tokenizer on every request
 # Opus 4.5 High Priority Fix H1: Bounded cache (was unbounded dict)
@@ -186,114 +204,137 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         Returns:
             Completion response
         """
-        try:
-            # Check if model is loaded, if not load it
-            status = worker_manager.get_status()
-            if not status["model_loaded"] or status["model_name"] != request.model:
-                logger.info(f"Loading model on-demand: {request.model}")
-                load_result = worker_manager.load_model(request.model)
-                logger.info(f"Model loaded: {load_result.model_name} ({load_result.memory_gb:.2f} GB)")
+        # Phase 1 (NASA): Backpressure control - limit concurrent requests
+        semaphore = _get_request_semaphore()
 
-            # Create IPC request
-            ipc_request = IPCCompletionRequest(
-                model=request.model,
-                prompt=request.prompt,
-                max_tokens=request.max_tokens,
-                temperature=request.temperature,
-                top_p=request.top_p,
-                repetition_penalty=request.repetition_penalty,
-                stream=request.stream
-            )
-
-            # Generate
-            if request.stream:
-                # Streaming
-                async def generate_stream():
-                    """Generate SSE stream for text completions."""
-                    try:
-                        # Use WorkerManager's streaming method (handles SharedMemoryBridge/StdioBridge)
-                        for chunk in worker_manager.generate_stream(ipc_request):
-                            if chunk.type == "stream_chunk":
-                                # Format as SSE for text completions (not chat)
-                                data = {
-                                    "id": "cmpl-mlx-v3",
-                                    "object": "text_completion",
-                                    "created": int(__import__('time').time()),
-                                    "model": request.model,
-                                    "choices": [{
-                                        "index": 0,
-                                        "text": chunk.text if chunk.text else "",
-                                        "finish_reason": chunk.finish_reason
-                                    }]
-                                }
-                                yield f"data: {json.dumps(data)}\n\n"
-
-                                if chunk.done:
-                                    yield "data: [DONE]\n\n"
-                                    break
-                            elif chunk.type == "error":
-                                yield f"data: {json.dumps(format_openai_error(chunk.message))}\n\n"
-                                break
-                    except Exception as e:
-                        # M2: Don't expose internal details in streaming errors
-                        logger.error(f"Streaming error: {e}", exc_info=True)
-                        yield f"data: {json.dumps(format_openai_error('Internal server error'))}\n\n"
-
-                return StreamingResponse(generate_stream(), media_type="text/event-stream")
-            else:
-                # Non-streaming
-                result = worker_manager.generate(ipc_request)
-
-                # Count prompt tokens using tokenizer
-                try:
-                    tokenizer = get_tokenizer(request.model)
-                    prompt_tokens = len(tokenizer.encode(request.prompt))
-                except Exception as e:
-                    # Can't load tokenizer (e.g., test mock), default to 0
-                    logger.warning(f"Could not count prompt tokens: {e}")
-                    prompt_tokens = 0
-                completion_tokens = result["tokens"]
-                total_tokens = prompt_tokens + completion_tokens
-
-                # Format response (OpenAI-compatible)
-                import time
-                return {
-                    "id": "cmpl-mlx-v3",
-                    "object": "text_completion",
-                    "created": int(time.time()),
-                    "model": request.model,
-                    "choices": [{
-                        "text": result["text"],
-                        "index": 0,
-                        "logprobs": None,
-                        "finish_reason": result["finish_reason"]
-                    }],
-                    "usage": {
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": total_tokens
+        # Opus Improvement 3: Fast-fail optimization for backpressure
+        # Note: This check is a fast-fail optimization, not a safety mechanism.
+        # The semaphore itself enforces the limit; this check allows immediate
+        # 503 response instead of brief blocking. A small race window exists
+        # but is benign (worst case: 1 extra request waits instead of failing).
+        if semaphore.locked() and semaphore._value == 0:
+            logger.warning("Request queue full - returning 503")
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": {
+                        "message": "Server is at capacity. Please retry after a brief delay.",
+                        "type": "server_overloaded",
+                        "code": "queue_full"
                     }
                 }
+            )
 
-        except HTTPException:
-            # Re-raise HTTP exceptions (like 501 for streaming)
-            raise
-        except ValueError as e:
-            # Validation errors (e.g., "Vision model requires at least one image")
-            raise HTTPException(status_code=400, detail=str(e))
-        except NoModelLoadedError as e:
-            raise HTTPException(status_code=503, detail=str(e))
-        except WorkerCommunicationError as e:
-            # Buffer full - system overloaded (backpressure)
-            logger.warning(f"Backpressure triggered: {e}")
-            raise HTTPException(status_code=503, detail=str(e))
-        except WorkerError as e:
-            logger.error(f"Worker error: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-        except Exception as e:
-            # M2: Don't expose internal details to client
-            logger.error(f"Unexpected error: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail="Internal server error")
+        # Acquire semaphore slot (auto-releases on function exit or exception)
+        async with semaphore:
+            try:
+                # Check if model is loaded, if not load it
+                status = worker_manager.get_status()
+                if not status["model_loaded"] or status["model_name"] != request.model:
+                    logger.info(f"Loading model on-demand: {request.model}")
+                    load_result = worker_manager.load_model(request.model)
+                    logger.info(f"Model loaded: {load_result.model_name} ({load_result.memory_gb:.2f} GB)")
+
+                # Create IPC request
+                ipc_request = IPCCompletionRequest(
+                    model=request.model,
+                    prompt=request.prompt,
+                    max_tokens=request.max_tokens,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                    repetition_penalty=request.repetition_penalty,
+                    stream=request.stream
+                )
+
+                # Generate
+                if request.stream:
+                    # Streaming
+                    async def generate_stream():
+                        """Generate SSE stream for text completions."""
+                        try:
+                            # Use WorkerManager's streaming method (handles SharedMemoryBridge/StdioBridge)
+                            for chunk in worker_manager.generate_stream(ipc_request):
+                                if chunk.type == "stream_chunk":
+                                    # Format as SSE for text completions (not chat)
+                                    data = {
+                                        "id": "cmpl-mlx-v3",
+                                        "object": "text_completion",
+                                        "created": int(__import__('time').time()),
+                                        "model": request.model,
+                                        "choices": [{
+                                            "index": 0,
+                                            "text": chunk.text if chunk.text else "",
+                                            "finish_reason": chunk.finish_reason
+                                        }]
+                                    }
+                                    yield f"data: {json.dumps(data)}\n\n"
+
+                                    if chunk.done:
+                                        yield "data: [DONE]\n\n"
+                                        break
+                                elif chunk.type == "error":
+                                    yield f"data: {json.dumps(format_openai_error(chunk.message))}\n\n"
+                                    break
+                        except Exception as e:
+                            # M2: Don't expose internal details in streaming errors
+                            logger.error(f"Streaming error: {e}", exc_info=True)
+                            yield f"data: {json.dumps(format_openai_error('Internal server error'))}\n\n"
+
+                    return StreamingResponse(generate_stream(), media_type="text/event-stream")
+                else:
+                    # Non-streaming
+                    result = worker_manager.generate(ipc_request)
+
+                    # Count prompt tokens using tokenizer
+                    try:
+                        tokenizer = get_tokenizer(request.model)
+                        prompt_tokens = len(tokenizer.encode(request.prompt))
+                    except Exception as e:
+                        # Can't load tokenizer (e.g., test mock), default to 0
+                        logger.warning(f"Could not count prompt tokens: {e}")
+                        prompt_tokens = 0
+                    completion_tokens = result["tokens"]
+                    total_tokens = prompt_tokens + completion_tokens
+
+                    # Format response (OpenAI-compatible)
+                    import time
+                    return {
+                        "id": "cmpl-mlx-v3",
+                        "object": "text_completion",
+                        "created": int(time.time()),
+                        "model": request.model,
+                        "choices": [{
+                            "text": result["text"],
+                            "index": 0,
+                            "logprobs": None,
+                            "finish_reason": result["finish_reason"]
+                        }],
+                        "usage": {
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": total_tokens
+                        }
+                    }
+
+            except HTTPException:
+                # Re-raise HTTP exceptions (like 501 for streaming)
+                raise
+            except ValueError as e:
+                # Validation errors (e.g., "Vision model requires at least one image")
+                raise HTTPException(status_code=400, detail=str(e))
+            except NoModelLoadedError as e:
+                raise HTTPException(status_code=503, detail=str(e))
+            except WorkerCommunicationError as e:
+                # Buffer full - system overloaded (backpressure)
+                logger.warning(f"Backpressure triggered: {e}")
+                raise HTTPException(status_code=503, detail=str(e))
+            except WorkerError as e:
+                logger.error(f"Worker error: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+            except Exception as e:
+                # M2: Don't expose internal details to client
+                logger.error(f"Unexpected error: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail="Internal server error")
 
     # V1 Chat completions endpoint
     @app.post("/v1/chat/completions")
@@ -307,213 +348,236 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         Returns:
             Chat completion response
         """
-        # Convert chat messages to prompt using model's chat template
-        logger.info(f"Chat completion request: stream={request.stream}, messages={len(request.messages)}, "
-                   f"max_tokens={request.max_tokens}, temp={request.temperature}, "
-                   f"top_p={request.top_p}, rep_penalty={request.repetition_penalty}")
+        # Phase 1 (NASA): Backpressure control - limit concurrent requests
+        semaphore = _get_request_semaphore()
 
-        try:
-            # Get cached tokenizer (Phase 1.1 optimization)
-            tokenizer = get_tokenizer(request.model)
-
-            # Convert messages to dicts for apply_chat_template
-            # Handle multimodal content (list of blocks) by extracting text only
-            messages_dict = []
-            for msg in request.messages:
-                if isinstance(msg.content, list):
-                    # Multimodal: extract text blocks only (skip images for prompt)
-                    text_parts = [
-                        block.text for block in msg.content
-                        if hasattr(block, 'type') and block.type == 'text'
-                    ]
-                    content_str = " ".join(text_parts)
-                else:
-                    # Text-only (backward compatible)
-                    content_str = msg.content
-                messages_dict.append({"role": msg.role, "content": content_str})
-
-            # Apply chat template (tokenize=False returns string, not tokens)
-            prompt = tokenizer.apply_chat_template(
-                messages_dict,
-                tokenize=False,
-                add_generation_prompt=True
-            )
-            logger.info(f"Chat template applied, prompt length: {len(prompt)} chars, stream={request.stream}")
-            logger.debug(f"Generated prompt: {prompt[:200]}...")
-        except Exception as e:
-            logger.warning(f"Failed to apply chat template for {request.model}: {e}")
-            logger.warning("Falling back to simple concatenation")
-            # Fallback to simple concatenation if template fails
-            # Handle multimodal content (list of content blocks)
-            prompt_parts = []
-            for msg in request.messages:
-                if isinstance(msg.content, list):
-                    # Multimodal: extract text blocks only (skip images)
-                    text_parts = [
-                        block.text for block in msg.content
-                        if hasattr(block, 'type') and block.type == 'text'
-                    ]
-                    content_str = " ".join(text_parts)
-                else:
-                    # Text-only
-                    content_str = msg.content
-                prompt_parts.append(f"{msg.role}: {content_str}")
-            prompt = "\n".join(prompt_parts)
-
-        try:
-            # Check if model is loaded, if not load it
-            status = worker_manager.get_status()
-            if not status["model_loaded"] or status["model_name"] != request.model:
-                logger.info(f"Loading model on-demand: {request.model}")
-                load_result = worker_manager.load_model(request.model)
-                logger.info(f"Model loaded: {load_result.model_name} ({load_result.memory_gb:.2f} GB)")
-
-            # Phase 2: Image preprocessing for vision/multimodal requests
-            images = None
-            has_images = any(
-                isinstance(msg.content, list) and
-                any(hasattr(block, 'type') and block.type == 'image_url' for block in msg.content)
-                for msg in request.messages
-            )
-
-            if has_images:
-                logger.info("Vision/multimodal request detected - preprocessing images")
-                try:
-                    # Collect all content blocks from all messages
-                    all_content_blocks = []
-                    for msg in request.messages:
-                        if isinstance(msg.content, list):
-                            all_content_blocks.extend(msg.content)
-
-                    # Get bridge for large images (if using shared memory)
-                    bridge = worker_manager.bridge if hasattr(worker_manager, 'bridge') else None
-
-                    # Preprocess images
-                    images = await prepare_images(all_content_blocks, bridge=bridge)
-                    logger.info(f"Preprocessed {len(images)} images for request")
-                except ImportError as e:
-                    # Pillow/mlx-vlm not installed
-                    logger.warning(f"Missing dependency for vision: {e}")
-                    raise HTTPException(status_code=400, detail=str(e))
-                except ImageProcessingError as e:
-                    logger.warning(f"Image preprocessing failed: {e}")
-                    raise HTTPException(status_code=400, detail=f"Image processing error: {e}")
-
-            # Create IPC request
-            ipc_request = IPCCompletionRequest(
-                model=request.model,
-                prompt=prompt,
-                max_tokens=request.max_tokens,
-                temperature=request.temperature,
-                top_p=request.top_p,
-                repetition_penalty=request.repetition_penalty,
-                stream=request.stream,
-                images=images  # Pass preprocessed images (None for text-only)
-            )
-
-            # Generate
-            if request.stream:
-                # Streaming - chat format
-                async def generate_stream():
-                    """Generate SSE stream for chat completions."""
-                    try:
-                        # Use WorkerManager's streaming method (handles SharedMemoryBridge/StdioBridge)
-                        for chunk in worker_manager.generate_stream(ipc_request):
-                            if chunk.type == "stream_chunk":
-                                # Format as SSE for chat completions (use delta.content)
-                                data = {
-                                    "id": "chatcmpl-mlx-v3",
-                                    "object": "chat.completion.chunk",
-                                    "created": int(__import__('time').time()),
-                                    "model": request.model,
-                                    "choices": [{
-                                        "index": 0,
-                                        "delta": {"content": chunk.text} if chunk.text else {},
-                                        "finish_reason": chunk.finish_reason
-                                    }]
-                                }
-                                yield f"data: {json.dumps(data)}\n\n"
-
-                                if chunk.done:
-                                    yield "data: [DONE]\n\n"
-                                    break
-                            elif chunk.type == "error":
-                                yield f"data: {json.dumps(format_openai_error(chunk.message))}\n\n"
-                                break
-                    except Exception as e:
-                        # M2: Don't expose internal details in streaming errors
-                        logger.error(f"Streaming error: {e}", exc_info=True)
-                        yield f"data: {json.dumps(format_openai_error('Internal server error'))}\n\n"
-
-                return StreamingResponse(generate_stream(), media_type="text/event-stream")
-            else:
-                # Non-streaming
-                import time
-                start_time = time.time()
-                result = worker_manager.generate(ipc_request)
-                generation_time = time.time() - start_time
-
-                # Convert to chat format
-                response_text = result["text"]
-                completion_tokens = result["tokens"]
-
-                # Count prompt tokens using tokenizer (reload if template failed)
-                try:
-                    prompt_tokens = len(tokenizer.encode(prompt))
-                except NameError:
-                    # Tokenizer not defined (template failed), try to reload it
-                    try:
-                        tokenizer = get_tokenizer(request.model)
-                        prompt_tokens = len(tokenizer.encode(prompt))
-                    except Exception as e:
-                        # Can't load tokenizer (e.g., test mock), default to 0
-                        logger.warning(f"Could not count prompt tokens: {e}")
-                        prompt_tokens = 0
-                total_tokens = prompt_tokens + completion_tokens
-
-                tokens_per_sec = completion_tokens / generation_time if generation_time > 0 else 0
-                logger.info(f"Chat completion: {len(response_text)} chars, {completion_tokens} tokens in {generation_time:.1f}s ({tokens_per_sec:.1f} tok/s)")
-                logger.debug(f"Response content: {response_text[:200]}...")
-                return {
-                    "id": "chatcmpl-mlx-v3",
-                    "object": "chat.completion",
-                    "created": int(time.time()),
-                    "model": request.model,
-                    "choices": [{
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": response_text
-                        },
-                        "finish_reason": result["finish_reason"]
-                    }],
-                    "usage": {
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": total_tokens,
-                        "tokens_per_sec": round(tokens_per_sec, 2)
+        # Opus Improvement 3: Fast-fail optimization for backpressure
+        # Note: This check is a fast-fail optimization, not a safety mechanism.
+        # The semaphore itself enforces the limit; this check allows immediate
+        # 503 response instead of brief blocking. A small race window exists
+        # but is benign (worst case: 1 extra request waits instead of failing).
+        if semaphore.locked() and semaphore._value == 0:
+            logger.warning("Request queue full - returning 503")
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": {
+                        "message": "Server is at capacity. Please retry after a brief delay.",
+                        "type": "server_overloaded",
+                        "code": "queue_full"
                     }
                 }
+            )
 
-        except HTTPException:
-            # Re-raise HTTP exceptions
-            raise
-        except ValueError as e:
-            # Validation errors (e.g., "Vision model requires at least one image")
-            raise HTTPException(status_code=400, detail=str(e))
-        except NoModelLoadedError as e:
-            raise HTTPException(status_code=503, detail=str(e))
-        except WorkerCommunicationError as e:
-            # Buffer full - system overloaded (backpressure)
-            logger.warning(f"Backpressure triggered: {e}")
-            raise HTTPException(status_code=503, detail=str(e))
-        except WorkerError as e:
-            logger.error(f"Worker error: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-        except Exception as e:
-            # M2: Don't expose internal details to client
-            logger.error(f"Unexpected error: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail="Internal server error")
+        # Acquire semaphore slot (auto-releases on function exit or exception)
+        async with semaphore:
+            # Convert chat messages to prompt using model's chat template
+            logger.info(f"Chat completion request: stream={request.stream}, messages={len(request.messages)}, "
+                       f"max_tokens={request.max_tokens}, temp={request.temperature}, "
+                       f"top_p={request.top_p}, rep_penalty={request.repetition_penalty}")
+
+            try:
+                # Get cached tokenizer (Phase 1.1 optimization)
+                tokenizer = get_tokenizer(request.model)
+
+                # Convert messages to dicts for apply_chat_template
+                # Handle multimodal content (list of blocks) by extracting text only
+                messages_dict = []
+                for msg in request.messages:
+                    if isinstance(msg.content, list):
+                        # Multimodal: extract text blocks only (skip images for prompt)
+                        text_parts = [
+                            block.text for block in msg.content
+                            if hasattr(block, 'type') and block.type == 'text'
+                        ]
+                        content_str = " ".join(text_parts)
+                    else:
+                        # Text-only (backward compatible)
+                        content_str = msg.content
+                    messages_dict.append({"role": msg.role, "content": content_str})
+
+                # Apply chat template (tokenize=False returns string, not tokens)
+                prompt = tokenizer.apply_chat_template(
+                    messages_dict,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
+                logger.info(f"Chat template applied, prompt length: {len(prompt)} chars, stream={request.stream}")
+                logger.debug(f"Generated prompt: {prompt[:200]}...")
+            except Exception as e:
+                logger.warning(f"Failed to apply chat template for {request.model}: {e}")
+                logger.warning("Falling back to simple concatenation")
+                # Fallback to simple concatenation if template fails
+                # Handle multimodal content (list of content blocks)
+                prompt_parts = []
+                for msg in request.messages:
+                    if isinstance(msg.content, list):
+                        # Multimodal: extract text blocks only (skip images)
+                        text_parts = [
+                            block.text for block in msg.content
+                            if hasattr(block, 'type') and block.type == 'text'
+                        ]
+                        content_str = " ".join(text_parts)
+                    else:
+                        # Text-only
+                        content_str = msg.content
+                    prompt_parts.append(f"{msg.role}: {content_str}")
+                prompt = "\n".join(prompt_parts)
+
+            try:
+                # Check if model is loaded, if not load it
+                status = worker_manager.get_status()
+                if not status["model_loaded"] or status["model_name"] != request.model:
+                    logger.info(f"Loading model on-demand: {request.model}")
+                    load_result = worker_manager.load_model(request.model)
+                    logger.info(f"Model loaded: {load_result.model_name} ({load_result.memory_gb:.2f} GB)")
+
+                # Phase 2: Image preprocessing for vision/multimodal requests
+                images = None
+                has_images = any(
+                    isinstance(msg.content, list) and
+                    any(hasattr(block, 'type') and block.type == 'image_url' for block in msg.content)
+                    for msg in request.messages
+                )
+
+                if has_images:
+                    logger.info("Vision/multimodal request detected - preprocessing images")
+                    try:
+                        # Collect all content blocks from all messages
+                        all_content_blocks = []
+                        for msg in request.messages:
+                            if isinstance(msg.content, list):
+                                all_content_blocks.extend(msg.content)
+
+                        # Get bridge for large images (if using shared memory)
+                        bridge = worker_manager.bridge if hasattr(worker_manager, 'bridge') else None
+
+                        # Preprocess images
+                        images = await prepare_images(all_content_blocks, bridge=bridge)
+                        logger.info(f"Preprocessed {len(images)} images for request")
+                    except ImportError as e:
+                        # Pillow/mlx-vlm not installed
+                        logger.warning(f"Missing dependency for vision: {e}")
+                        raise HTTPException(status_code=400, detail=str(e))
+                    except ImageProcessingError as e:
+                        logger.warning(f"Image preprocessing failed: {e}")
+                        raise HTTPException(status_code=400, detail=f"Image processing error: {e}")
+
+                # Create IPC request
+                ipc_request = IPCCompletionRequest(
+                    model=request.model,
+                    prompt=prompt,
+                    max_tokens=request.max_tokens,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                    repetition_penalty=request.repetition_penalty,
+                    stream=request.stream,
+                    images=images  # Pass preprocessed images (None for text-only)
+                )
+
+                # Generate
+                if request.stream:
+                    # Streaming - chat format
+                    async def generate_stream():
+                        """Generate SSE stream for chat completions."""
+                        try:
+                            # Use WorkerManager's streaming method (handles SharedMemoryBridge/StdioBridge)
+                            for chunk in worker_manager.generate_stream(ipc_request):
+                                if chunk.type == "stream_chunk":
+                                    # Format as SSE for chat completions (use delta.content)
+                                    data = {
+                                        "id": "chatcmpl-mlx-v3",
+                                        "object": "chat.completion.chunk",
+                                        "created": int(__import__('time').time()),
+                                        "model": request.model,
+                                        "choices": [{
+                                            "index": 0,
+                                            "delta": {"content": chunk.text} if chunk.text else {},
+                                            "finish_reason": chunk.finish_reason
+                                        }]
+                                    }
+                                    yield f"data: {json.dumps(data)}\n\n"
+
+                                    if chunk.done:
+                                        yield "data: [DONE]\n\n"
+                                        break
+                                elif chunk.type == "error":
+                                    yield f"data: {json.dumps(format_openai_error(chunk.message))}\n\n"
+                                    break
+                        except Exception as e:
+                            # M2: Don't expose internal details in streaming errors
+                            logger.error(f"Streaming error: {e}", exc_info=True)
+                            yield f"data: {json.dumps(format_openai_error('Internal server error'))}\n\n"
+
+                    return StreamingResponse(generate_stream(), media_type="text/event-stream")
+                else:
+                    # Non-streaming
+                    import time
+                    start_time = time.time()
+                    result = worker_manager.generate(ipc_request)
+                    generation_time = time.time() - start_time
+
+                    # Convert to chat format
+                    response_text = result["text"]
+                    completion_tokens = result["tokens"]
+
+                    # Count prompt tokens using tokenizer (reload if template failed)
+                    try:
+                        prompt_tokens = len(tokenizer.encode(prompt))
+                    except NameError:
+                        # Tokenizer not defined (template failed), try to reload it
+                        try:
+                            tokenizer = get_tokenizer(request.model)
+                            prompt_tokens = len(tokenizer.encode(prompt))
+                        except Exception as e:
+                            # Can't load tokenizer (e.g., test mock), default to 0
+                            logger.warning(f"Could not count prompt tokens: {e}")
+                            prompt_tokens = 0
+                    total_tokens = prompt_tokens + completion_tokens
+
+                    tokens_per_sec = completion_tokens / generation_time if generation_time > 0 else 0
+                    logger.info(f"Chat completion: {len(response_text)} chars, {completion_tokens} tokens in {generation_time:.1f}s ({tokens_per_sec:.1f} tok/s)")
+                    logger.debug(f"Response content: {response_text[:200]}...")
+                    return {
+                        "id": "chatcmpl-mlx-v3",
+                        "object": "chat.completion",
+                        "created": int(time.time()),
+                        "model": request.model,
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": response_text
+                            },
+                            "finish_reason": result["finish_reason"]
+                        }],
+                        "usage": {
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": total_tokens,
+                            "tokens_per_sec": round(tokens_per_sec, 2)
+                        }
+                    }
+
+            except HTTPException:
+                # Re-raise HTTP exceptions
+                raise
+            except ValueError as e:
+                # Validation errors (e.g., "Vision model requires at least one image")
+                raise HTTPException(status_code=400, detail=str(e))
+            except NoModelLoadedError as e:
+                raise HTTPException(status_code=503, detail=str(e))
+            except WorkerCommunicationError as e:
+                # Buffer full - system overloaded (backpressure)
+                logger.warning(f"Backpressure triggered: {e}")
+                raise HTTPException(status_code=503, detail=str(e))
+            except WorkerError as e:
+                logger.error(f"Worker error: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+            except Exception as e:
+                # M2: Don't expose internal details to client
+                logger.error(f"Unexpected error: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail="Internal server error")
 
     # Models list endpoint
     @app.get("/v1/models")

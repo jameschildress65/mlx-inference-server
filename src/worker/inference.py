@@ -19,7 +19,33 @@ except ImportError:
     # PIL not available (text-only worker)
     Image = None
 
+# Opus Improvement 1: Import MLX at module level for cache clearing
+try:
+    import mlx.core as mx
+    _HAS_MLX_METAL = hasattr(mx, 'metal')
+except ImportError:
+    mx = None
+    _HAS_MLX_METAL = False
+
 logger = logging.getLogger(__name__)
+
+
+# Opus Improvement 2: Extract cache clearing to helper function
+def _clear_mlx_cache_safe(context: str = "inference"):
+    """Clear MLX GPU cache, handling errors gracefully.
+
+    Recommended by Opus 4.5 for memory management under sustained load.
+    Prevents GPU memory fragmentation that causes worker crashes.
+
+    Args:
+        context: Description for logging (e.g., "text inference", "vision inference")
+    """
+    if _HAS_MLX_METAL:
+        try:
+            mx.metal.clear_cache()
+            logger.debug(f"Cleared MLX GPU cache after {context}")
+        except Exception as e:
+            logger.debug(f"Could not clear MLX cache: {e}")
 
 
 class InferenceBackend(ABC):
@@ -157,6 +183,9 @@ class TextInferenceBackend(InferenceBackend):
             full_text = "".join(text_chunks)
             logger.debug(f"Generated {response_obj.generation_tokens} tokens at {response_obj.generation_tps:.1f} tok/s")
 
+            # MLX Optimization (Phase 1): Clear GPU cache after text inference
+            _clear_mlx_cache_safe("text inference")
+
             return {
                 "text": full_text,
                 "tokens": response_obj.generation_tokens,
@@ -233,6 +262,9 @@ class TextInferenceBackend(InferenceBackend):
                 if response.finish_reason is not None:
                     logger.debug(f"Stream complete: {response.generation_tokens} tokens")
                     break
+
+            # MLX Optimization (Phase 1): Clear GPU cache after streaming completes
+            _clear_mlx_cache_safe("text streaming")
 
         except Exception as e:
             logger.error(f"Streaming generation failed: {e}", exc_info=True)
@@ -475,15 +507,7 @@ class VisionInferenceBackend(InferenceBackend):
         logger.debug(f"Generated vision response: {len(output_text)} chars, ~{tokens} tokens")
 
         # MLX Optimization (v3.1.0): Clear GPU cache after vision inference
-        # Recommended by Opus 4.5 + Apple/MLX team for memory management
-        try:
-            import mlx.core as mx
-            if hasattr(mx, 'metal'):
-                mx.metal.clear_cache()
-                logger.debug("Cleared MLX GPU cache after vision inference")
-        except Exception as e:
-            # Non-critical - log but continue
-            logger.debug(f"Could not clear MLX cache: {e}")
+        _clear_mlx_cache_safe("vision inference")
 
         return {
             "text": output_text,
