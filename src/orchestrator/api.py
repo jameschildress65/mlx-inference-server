@@ -20,6 +20,14 @@ from .image_utils import prepare_images, ImageProcessingError
 
 logger = logging.getLogger(__name__)
 
+# Phase 2.7: Check MLX Metal availability for GPU health checks
+try:
+    import mlx.core as mx
+    _HAS_MLX_METAL = hasattr(mx, 'metal')
+except ImportError:
+    mx = None
+    _HAS_MLX_METAL = False
+
 # Phase 1 (NASA): Request queue depth control - backpressure mechanism
 # Opus 4.5 recommendation: Limit concurrent requests to prevent worker overload
 _request_semaphore: Optional[Semaphore] = None
@@ -293,11 +301,158 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
             content=format_openai_error(exc.detail, error_type)
         )
 
-    # Health check
+    # Phase 2.7: Health Check Helpers
+    def check_gpu_health() -> dict:
+        """Check GPU availability and status."""
+        try:
+            # Check if MLX Metal is available
+            if _HAS_MLX_METAL:
+                # Try to get GPU memory info (if available on this platform)
+                return {
+                    "available": True,
+                    "backend": "mlx.metal"
+                }
+            else:
+                return {
+                    "available": False,
+                    "backend": "cpu_fallback"
+                }
+        except Exception as e:
+            logger.debug(f"GPU health check failed: {e}")
+            return {
+                "available": False,
+                "error": str(e)
+            }
+
+    def check_memory_health() -> dict:
+        """Check system memory usage."""
+        import psutil
+        mem = psutil.virtual_memory()
+        return {
+            "percent_used": mem.percent,
+            "healthy": mem.percent < 90,
+            "available_gb": mem.available / (1024**3),
+            "total_gb": mem.total / (1024**3)
+        }
+
+    def check_disk_health() -> dict:
+        """Check disk usage."""
+        import psutil
+        disk = psutil.disk_usage('/')
+        return {
+            "percent_used": disk.percent,
+            "healthy": disk.percent < 90,
+            "available_gb": disk.free / (1024**3),
+            "total_gb": disk.total / (1024**3)
+        }
+
+    def check_worker_health() -> dict:
+        """Check worker process health."""
+        try:
+            health = worker_manager.health_check()
+            status = worker_manager.get_status()
+            return {
+                "alive": health["healthy"],
+                "status": health["status"],
+                "model_loaded": status["model_loaded"],
+                "model_name": status["model_name"] if status["model_loaded"] else None
+            }
+        except Exception as e:
+            logger.error(f"Worker health check failed: {e}")
+            return {
+                "alive": False,
+                "status": "error",
+                "error": str(e)
+            }
+
+    # Health check (Phase 2.7: Deep health check)
     @app.get("/health")
     async def health_check():
-        """Basic health check."""
-        return {"status": "healthy", "version": "3.1.1"}
+        """
+        Deep health check for load balancer and monitoring.
+
+        Checks:
+        - GPU availability and status
+        - System memory usage (<90%)
+        - Disk usage (<90%)
+        - Worker process health
+        - Model loaded status
+
+        Returns:
+            200 if all checks pass, 503 if any check fails
+        """
+        from datetime import datetime
+
+        # Run all health checks
+        gpu = check_gpu_health()
+        memory = check_memory_health()
+        disk = check_disk_health()
+        worker = check_worker_health()
+
+        checks = {
+            "gpu": gpu.get("available", False),
+            "memory": memory["healthy"],
+            "disk": disk["healthy"],
+            "worker": worker["alive"],
+            "model_loaded": worker["model_loaded"]
+        }
+
+        # Overall health = all checks pass
+        healthy = all(checks.values())
+
+        # Detailed response
+        response = {
+            "healthy": healthy,
+            "checks": checks,
+            "details": {
+                "gpu": gpu,
+                "memory": memory,
+                "disk": disk,
+                "worker": worker
+            },
+            "timestamp": datetime.utcnow().isoformat(),
+            "version": "3.1.1"
+        }
+
+        status_code = 200 if healthy else 503
+        return JSONResponse(status_code=status_code, content=response)
+
+    # Phase 2.7: Kubernetes-style readiness probe
+    @app.get("/ready")
+    async def readiness_check():
+        """
+        Kubernetes-style readiness probe.
+
+        Ready = can handle new requests right now:
+        - Queue has available slots
+        - Worker is alive
+        - Model is loaded
+
+        Returns:
+            200 if ready to handle requests, 503 if not ready
+        """
+        semaphore = _get_request_semaphore()
+        worker = check_worker_health()
+
+        # Ready conditions
+        queue_space = semaphore._value > 0
+        worker_alive = worker["alive"]
+        model_loaded = worker["model_loaded"]
+
+        ready = queue_space and worker_alive and model_loaded
+
+        response = {
+            "ready": ready,
+            "conditions": {
+                "queue_available": queue_space,
+                "worker_alive": worker_alive,
+                "model_loaded": model_loaded
+            },
+            "queue_slots_available": semaphore._value
+        }
+
+        status_code = 200 if ready else 503
+        return JSONResponse(status_code=status_code, content=response)
 
     # V1 Completions endpoint
     @app.post("/v1/completions")
