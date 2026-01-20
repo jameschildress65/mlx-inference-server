@@ -75,6 +75,8 @@ def server_config_v3(test_ports_v3, test_dirs_v3):
         host="127.0.0.1",
         idle_timeout_seconds=300,  # 5 min for tests
         request_timeout_seconds=120,  # 2 min for tests
+        model_load_timeout_seconds=300,  # Phase 2 field
+        max_concurrent_requests=10,  # Phase 2.1 field
         memory_threshold_gb=28,
         cache_dir=actual_cache,  # Use real cache
         log_dir=test_dirs_v3["log_dir"],
