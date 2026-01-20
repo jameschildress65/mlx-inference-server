@@ -812,7 +812,6 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                     return StreamingResponse(generate_stream(), media_type="text/event-stream")
                 else:
                     # Non-streaming
-                    import time
                     start_time = time.time()
                     result = worker_manager.generate(ipc_request)
                     generation_time = time.time() - start_time
