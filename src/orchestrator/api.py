@@ -31,7 +31,7 @@ except ImportError:
 # Phase 1 (NASA): Request queue depth control - backpressure mechanism
 # Opus 4.5 recommendation: Limit concurrent requests to prevent worker overload
 _request_semaphore: Optional[Semaphore] = None
-_max_queue_depth = 10  # Conservative: limits concurrent requests to single worker
+_max_queue_depth = 10  # Default fallback (Phase 2.1: Overridden by config.max_concurrent_requests)
 
 def _get_request_semaphore() -> Semaphore:
     """Get or create the request semaphore for backpressure control.
@@ -258,6 +258,11 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
     Returns:
         FastAPI application
     """
+    # Phase 2.1: Initialize queue depth from configuration
+    global _max_queue_depth
+    _max_queue_depth = config.max_concurrent_requests
+    logger.info(f"Request queue depth set to {_max_queue_depth} (from config)")
+
     app = FastAPI(
         title="MLX Server V3",
         description="Production-grade LLM inference server with process isolation",

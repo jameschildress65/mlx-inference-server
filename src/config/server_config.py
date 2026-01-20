@@ -50,6 +50,9 @@ class ServerConfig:
     # Memory (GB)
     memory_threshold_gb: int
 
+    # Phase 2.1: Request Queue Configuration
+    max_concurrent_requests: int  # Maximum concurrent requests (backpressure control)
+
     # Paths
     cache_dir: str
     log_dir: str
@@ -170,6 +173,7 @@ class ServerConfig:
                 "request_timeout_seconds": 600,   # 10 minutes (long contexts)
                 "model_load_timeout_seconds": 300,  # 5 minutes (supports 32B+ models)
                 "memory_threshold_gb": ram_gb - 20,  # Leave 20GB for system
+                "max_concurrent_requests": 10,    # Phase 2.1: High capacity
                 "cache_dir": default_cache,
                 "description": f"High-memory configuration ({ram_gb}GB RAM)"
             }
@@ -181,6 +185,7 @@ class ServerConfig:
                 "request_timeout_seconds": 300,   # 5 minutes
                 "model_load_timeout_seconds": 180,  # 3 minutes (supports 14B models)
                 "memory_threshold_gb": ram_gb - 8,  # Leave 8GB for system
+                "max_concurrent_requests": 5,     # Phase 2.1: Medium capacity
                 "cache_dir": default_cache,
                 "description": f"Medium-memory configuration ({ram_gb}GB RAM)"
             }
@@ -192,6 +197,7 @@ class ServerConfig:
                 "request_timeout_seconds": 180,   # 3 minutes
                 "model_load_timeout_seconds": 120,  # 2 minutes (small models only)
                 "memory_threshold_gb": max(8, ram_gb - 4),  # Leave 4GB for system
+                "max_concurrent_requests": 3,     # Phase 2.1: Low capacity (conservative)
                 "cache_dir": default_cache,
                 "description": f"Low-memory configuration ({ram_gb}GB RAM)"
             }
@@ -212,6 +218,7 @@ class ServerConfig:
         - MLX_IDLE_TIMEOUT: Override idle timeout (seconds)
         - MLX_REQUEST_TIMEOUT: Override request timeout (seconds)
         - MLX_MODEL_LOAD_TIMEOUT: Override model load timeout (seconds)
+        - MLX_MAX_CONCURRENT_REQUESTS: Override max concurrent requests (Phase 2.1)
         - MLX_ADMIN_PORT: Override admin port (default: 11441)
         - HF_HOME: Override model cache directory
         - MLX_LOG_DIR: Override log directory
@@ -260,6 +267,11 @@ class ServerConfig:
         # Enable by default, can disable for debugging with MLX_USE_STDIO=1
         use_shared_memory = os.getenv("MLX_USE_STDIO", "0") != "1"
 
+        # Phase 2.1: Max concurrent requests (backpressure control)
+        max_concurrent_requests = int(
+            os.getenv("MLX_MAX_CONCURRENT_REQUESTS", str(default_config["max_concurrent_requests"]))
+        )
+
         # Create configuration
         config = cls(
             main_port=11440,  # V3 Main API port (parallel with V2 on 11436)
@@ -269,6 +281,7 @@ class ServerConfig:
             request_timeout_seconds=request_timeout,
             model_load_timeout_seconds=model_load_timeout,
             memory_threshold_gb=default_config["memory_threshold_gb"],
+            max_concurrent_requests=max_concurrent_requests,  # Phase 2.1: Queue depth
             cache_dir=cache_dir,
             log_dir=log_dir,
             use_shared_memory=use_shared_memory,  # PHASE 2: Shared memory IPC
@@ -290,6 +303,7 @@ class ServerConfig:
         logger.info(f"Cache directory: {config.cache_dir}")
         logger.info(f"Idle timeout: {config.idle_timeout_seconds}s")
         logger.info(f"Memory threshold: {config.memory_threshold_gb}GB")
+        logger.info(f"Max concurrent requests: {config.max_concurrent_requests} (Phase 2.1)")
         logger.info(f"IPC method: {'Shared Memory' if config.use_shared_memory else 'stdio'} (Phase 2)")
 
         return config
@@ -342,6 +356,7 @@ Paths:
             "request_timeout_seconds": self.request_timeout_seconds,
             "model_load_timeout_seconds": self.model_load_timeout_seconds,
             "memory_threshold_gb": self.memory_threshold_gb,
+            "max_concurrent_requests": self.max_concurrent_requests,
             "cache_dir": self.cache_dir,
             "log_dir": self.log_dir,
             "use_shared_memory": self.use_shared_memory,

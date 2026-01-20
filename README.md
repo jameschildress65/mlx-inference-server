@@ -117,10 +117,11 @@ Server auto-detects hardware and configures itself based on available RAM:
 
 **Override with environment variables:**
 ```bash
-export MLX_IDLE_TIMEOUT=600          # Idle timeout (seconds)
-export MLX_REQUEST_TIMEOUT=300       # Request timeout (seconds)
-export MLX_ADMIN_PORT=11441          # Admin API port
-export HF_HOME=~/.cache/huggingface  # Model cache directory
+export MLX_IDLE_TIMEOUT=600              # Idle timeout (seconds)
+export MLX_REQUEST_TIMEOUT=300           # Request timeout (seconds)
+export MLX_MAX_CONCURRENT_REQUESTS=10    # Max concurrent requests (Phase 2.1)
+export MLX_ADMIN_PORT=11441              # Admin API port
+export HF_HOME=~/.cache/huggingface      # Model cache directory
 ```
 
 ## Architecture
