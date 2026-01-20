@@ -69,6 +69,11 @@ htmlcov/
 *.orig
 tmp/
 
+# Backup files (bloat prevention)
+* 2.py
+* 2.md
+*.backup
+
 # Private/Internal (not for public repo)
 private/
 opus-submissions/
