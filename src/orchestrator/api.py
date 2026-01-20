@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import json
+import time
 from asyncio import Semaphore
 from functools import lru_cache
 from typing import Dict, Any, Optional, Union, Literal
@@ -34,6 +35,112 @@ def _get_request_semaphore() -> Semaphore:
     if _request_semaphore is None:
         _request_semaphore = Semaphore(_max_queue_depth)
     return _request_semaphore
+
+
+# Phase 2.2: Request Metrics - Monitor Phase 1 backpressure and performance
+class RequestMetrics:
+    """Track request metrics for monitoring and tuning Phase 1 improvements.
+
+    Tracks:
+    - Backpressure effectiveness (503 rejects, queue depth)
+    - Request performance (duration, wait times)
+    - Success/failure rates
+
+    Thread-safety: Single-threaded asyncio, no locks needed.
+    """
+
+    def __init__(self):
+        # Backpressure metrics
+        self.queue_full_rejects = 0  # HTTP 503 count
+        self.total_requests = 0
+        self.successful_requests = 0
+        self.failed_requests = 0
+
+        # Performance metrics (keep last 1000 for stats)
+        self._max_samples = 1000
+        self.request_duration_ms: list[float] = []
+        self.queue_wait_time_ms: list[float] = []
+
+    def record_queue_reject(self):
+        """Record a 503 rejection due to full queue."""
+        self.queue_full_rejects += 1
+
+    def record_request_start(self):
+        """Record request received."""
+        self.total_requests += 1
+
+    def record_request_success(self, duration_ms: float, wait_ms: float = 0.0):
+        """Record successful request completion."""
+        self.successful_requests += 1
+        self._add_duration(duration_ms)
+        if wait_ms > 0:
+            self._add_wait_time(wait_ms)
+
+    def record_request_failure(self, duration_ms: float):
+        """Record failed request."""
+        self.failed_requests += 1
+        self._add_duration(duration_ms)
+
+    def _add_duration(self, ms: float):
+        """Add duration sample, keep last N."""
+        self.request_duration_ms.append(ms)
+        if len(self.request_duration_ms) > self._max_samples:
+            self.request_duration_ms.pop(0)
+
+    def _add_wait_time(self, ms: float):
+        """Add wait time sample, keep last N."""
+        self.queue_wait_time_ms.append(ms)
+        if len(self.queue_wait_time_ms) > self._max_samples:
+            self.queue_wait_time_ms.pop(0)
+
+    def get_stats(self) -> dict:
+        """Get current metrics snapshot."""
+        import statistics
+
+        # Calculate percentiles for durations
+        duration_stats = {}
+        if self.request_duration_ms:
+            duration_stats = {
+                "p50": statistics.median(self.request_duration_ms),
+                "p95": self._percentile(self.request_duration_ms, 0.95),
+                "p99": self._percentile(self.request_duration_ms, 0.99),
+                "avg": statistics.mean(self.request_duration_ms),
+                "min": min(self.request_duration_ms),
+                "max": max(self.request_duration_ms),
+            }
+
+        # Calculate wait time stats
+        wait_stats = {}
+        if self.queue_wait_time_ms:
+            wait_stats = {
+                "avg": statistics.mean(self.queue_wait_time_ms),
+                "p95": self._percentile(self.queue_wait_time_ms, 0.95),
+            }
+
+        return {
+            "total_requests": self.total_requests,
+            "successful_requests": self.successful_requests,
+            "failed_requests": self.failed_requests,
+            "queue_full_rejects": self.queue_full_rejects,
+            "success_rate": self.successful_requests / max(1, self.total_requests),
+            "request_duration_ms": duration_stats,
+            "queue_wait_time_ms": wait_stats,
+        }
+
+    def _percentile(self, data: list[float], p: float) -> float:
+        """Calculate percentile (p in [0, 1])."""
+        import statistics
+        return statistics.quantiles(data, n=100)[int(p * 100) - 1] if len(data) >= 2 else (data[0] if data else 0.0)
+
+
+# Global metrics instance
+_request_metrics = RequestMetrics()
+
+
+def get_metrics() -> RequestMetrics:
+    """Get global metrics instance."""
+    return _request_metrics
+
 
 # Phase 1.1: Tokenizer cache - avoid reloading tokenizer on every request
 # Opus 4.5 High Priority Fix H1: Bounded cache (was unbounded dict)
@@ -214,6 +321,8 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         # but is benign (worst case: 1 extra request waits instead of failing).
         if semaphore.locked() and semaphore._value == 0:
             logger.warning("Request queue full - returning 503")
+            # Phase 2.2: Track queue rejection
+            get_metrics().record_queue_reject()
             return JSONResponse(
                 status_code=503,
                 content={
@@ -227,6 +336,10 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
 
         # Acquire semaphore slot (auto-releases on function exit or exception)
         async with semaphore:
+            # Phase 2.2: Track request timing
+            request_start_time = time.time()
+            get_metrics().record_request_start()
+
             try:
                 # Check if model is loaded, if not load it
                 status = worker_manager.get_status()
@@ -296,8 +409,11 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                     completion_tokens = result["tokens"]
                     total_tokens = prompt_tokens + completion_tokens
 
+                    # Phase 2.2: Track successful request
+                    duration_ms = (time.time() - request_start_time) * 1000
+                    get_metrics().record_request_success(duration_ms)
+
                     # Format response (OpenAI-compatible)
-                    import time
                     return {
                         "id": "cmpl-mlx-v3",
                         "object": "text_completion",
@@ -317,21 +433,39 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                     }
 
             except HTTPException:
+                # Phase 2.2: Track failure
+                duration_ms = (time.time() - request_start_time) * 1000
+                get_metrics().record_request_failure(duration_ms)
                 # Re-raise HTTP exceptions (like 501 for streaming)
                 raise
             except ValueError as e:
+                # Phase 2.2: Track failure
+                duration_ms = (time.time() - request_start_time) * 1000
+                get_metrics().record_request_failure(duration_ms)
                 # Validation errors (e.g., "Vision model requires at least one image")
                 raise HTTPException(status_code=400, detail=str(e))
             except NoModelLoadedError as e:
+                # Phase 2.2: Track failure
+                duration_ms = (time.time() - request_start_time) * 1000
+                get_metrics().record_request_failure(duration_ms)
                 raise HTTPException(status_code=503, detail=str(e))
             except WorkerCommunicationError as e:
+                # Phase 2.2: Track failure
+                duration_ms = (time.time() - request_start_time) * 1000
+                get_metrics().record_request_failure(duration_ms)
                 # Buffer full - system overloaded (backpressure)
                 logger.warning(f"Backpressure triggered: {e}")
                 raise HTTPException(status_code=503, detail=str(e))
             except WorkerError as e:
+                # Phase 2.2: Track failure
+                duration_ms = (time.time() - request_start_time) * 1000
+                get_metrics().record_request_failure(duration_ms)
                 logger.error(f"Worker error: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
             except Exception as e:
+                # Phase 2.2: Track failure
+                duration_ms = (time.time() - request_start_time) * 1000
+                get_metrics().record_request_failure(duration_ms)
                 # M2: Don't expose internal details to client
                 logger.error(f"Unexpected error: {e}", exc_info=True)
                 raise HTTPException(status_code=500, detail="Internal server error")
@@ -358,6 +492,8 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         # but is benign (worst case: 1 extra request waits instead of failing).
         if semaphore.locked() and semaphore._value == 0:
             logger.warning("Request queue full - returning 503")
+            # Phase 2.2: Track queue rejection
+            get_metrics().record_queue_reject()
             return JSONResponse(
                 status_code=503,
                 content={
@@ -371,6 +507,10 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
 
         # Acquire semaphore slot (auto-releases on function exit or exception)
         async with semaphore:
+            # Phase 2.2: Track request timing
+            request_start_time = time.time()
+            get_metrics().record_request_start()
+
             # Convert chat messages to prompt using model's chat template
             logger.info(f"Chat completion request: stream={request.stream}, messages={len(request.messages)}, "
                        f"max_tokens={request.max_tokens}, temp={request.temperature}, "
@@ -538,6 +678,11 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                     tokens_per_sec = completion_tokens / generation_time if generation_time > 0 else 0
                     logger.info(f"Chat completion: {len(response_text)} chars, {completion_tokens} tokens in {generation_time:.1f}s ({tokens_per_sec:.1f} tok/s)")
                     logger.debug(f"Response content: {response_text[:200]}...")
+
+                    # Phase 2.2: Track successful request
+                    duration_ms = (time.time() - request_start_time) * 1000
+                    get_metrics().record_request_success(duration_ms)
+
                     return {
                         "id": "chatcmpl-mlx-v3",
                         "object": "chat.completion",
@@ -560,21 +705,39 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                     }
 
             except HTTPException:
+                # Phase 2.2: Track failure
+                duration_ms = (time.time() - request_start_time) * 1000
+                get_metrics().record_request_failure(duration_ms)
                 # Re-raise HTTP exceptions
                 raise
             except ValueError as e:
+                # Phase 2.2: Track failure
+                duration_ms = (time.time() - request_start_time) * 1000
+                get_metrics().record_request_failure(duration_ms)
                 # Validation errors (e.g., "Vision model requires at least one image")
                 raise HTTPException(status_code=400, detail=str(e))
             except NoModelLoadedError as e:
+                # Phase 2.2: Track failure
+                duration_ms = (time.time() - request_start_time) * 1000
+                get_metrics().record_request_failure(duration_ms)
                 raise HTTPException(status_code=503, detail=str(e))
             except WorkerCommunicationError as e:
+                # Phase 2.2: Track failure
+                duration_ms = (time.time() - request_start_time) * 1000
+                get_metrics().record_request_failure(duration_ms)
                 # Buffer full - system overloaded (backpressure)
                 logger.warning(f"Backpressure triggered: {e}")
                 raise HTTPException(status_code=503, detail=str(e))
             except WorkerError as e:
+                # Phase 2.2: Track failure
+                duration_ms = (time.time() - request_start_time) * 1000
+                get_metrics().record_request_failure(duration_ms)
                 logger.error(f"Worker error: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
             except Exception as e:
+                # Phase 2.2: Track failure
+                duration_ms = (time.time() - request_start_time) * 1000
+                get_metrics().record_request_failure(duration_ms)
                 # M2: Don't expose internal details to client
                 logger.error(f"Unexpected error: {e}", exc_info=True)
                 raise HTTPException(status_code=500, detail="Internal server error")
@@ -675,6 +838,35 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
                 "idle_timeout_seconds": config.idle_timeout_seconds
             }
         }
+
+    @app.get("/admin/metrics")
+    async def admin_metrics():
+        """
+        Get request metrics for monitoring Phase 1 backpressure and performance.
+
+        Returns:
+            Metrics including:
+            - Request counts (total, success, failures, 503 rejects)
+            - Success rate
+            - Request duration statistics (p50, p95, p99, avg, min, max)
+            - Queue wait time statistics
+            - Current queue state
+        """
+        metrics = get_metrics()
+        semaphore = _get_request_semaphore()
+
+        # Get metrics snapshot
+        stats = metrics.get_stats()
+
+        # Add current queue state
+        stats["queue"] = {
+            "max_depth": _max_queue_depth,
+            "active_requests": _max_queue_depth - semaphore._value,
+            "available_slots": semaphore._value,
+            "utilization": (_max_queue_depth - semaphore._value) / _max_queue_depth
+        }
+
+        return stats
 
     @app.get("/admin/capabilities")
     async def admin_capabilities():
