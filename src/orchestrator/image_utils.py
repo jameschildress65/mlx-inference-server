@@ -23,6 +23,16 @@ from pathlib import Path
 from urllib.parse import urlparse
 import asyncio
 
+# S2: Image bomb protection - set PIL limit at module level
+# This MUST be set before any PIL Image operations to prevent decompression bombs
+# 50 megapixels = ~7071x7071 image = reasonable limit for vision models
+# Duplicated from inference.py for safety (module load order not guaranteed)
+try:
+    from PIL import Image
+    Image.MAX_IMAGE_PIXELS = 50_000_000
+except ImportError:
+    pass  # PIL not available - will fail later if images are processed
+
 logger = logging.getLogger(__name__)
 
 # Configuration (from plan)
@@ -340,6 +350,77 @@ def is_safe_url(url: str) -> Tuple[bool, Optional[str]]:
         return (False, f"URL validation error: {e}")
 
 
+def resolve_and_validate_url(url: str) -> Tuple[str, str, int]:
+    """
+    Resolve URL hostname and validate against SSRF, returning pinned IP and port.
+
+    This function performs DNS resolution and SSRF validation in one step,
+    returning the resolved IP for DNS pinning to prevent DNS rebinding attacks.
+
+    S1 Security Fix (Opus review):
+    - Prevents DNS rebinding attacks
+    - Returns actual port for proper --resolve pinning
+    - Handles IPv4-mapped IPv6 addresses
+    - Validates scheme is http/https only
+
+    Args:
+        url: URL to resolve and validate
+
+    Returns:
+        Tuple of (hostname, pinned_ip, port) for use with curl --resolve
+
+    Raises:
+        InvalidImageError: If URL is unsafe or cannot be resolved
+    """
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+
+    if not hostname:
+        raise InvalidImageError("URL missing hostname")
+
+    # S1 Fix (Opus): Validate scheme first
+    if parsed.scheme not in ('http', 'https'):
+        raise InvalidImageError(f"URL scheme must be http or https, got: {parsed.scheme}")
+
+    # S1 Fix (Opus): Extract actual port
+    if parsed.port:
+        port = parsed.port
+    elif parsed.scheme == 'https':
+        port = 443
+    else:
+        port = 80
+
+    # Resolve hostname to IP
+    try:
+        results = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC)
+    except socket.gaierror as e:
+        raise InvalidImageError(f"Cannot resolve hostname {hostname}: {e}")
+
+    if not results:
+        raise InvalidImageError(f"No IP addresses found for hostname: {hostname}")
+
+    # Get first resolved IP and validate it
+    pinned_ip = results[0][4][0]
+
+    try:
+        ip = ipaddress.ip_address(pinned_ip)
+
+        # S1 Fix (Opus): Handle IPv4-mapped IPv6 addresses (e.g., ::ffff:169.254.169.254)
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped  # Extract and validate the IPv4 portion
+
+        for blocked_range in BLOCKED_IP_RANGES:
+            if ip in blocked_range:
+                raise InvalidImageError(
+                    f"URL resolves to blocked IP range: {pinned_ip} in {blocked_range} "
+                    f"(SSRF protection - private/internal network access blocked)"
+                )
+    except ValueError as e:
+        raise InvalidImageError(f"Invalid IP address format: {pinned_ip}: {e}")
+
+    return (hostname, pinned_ip, port)
+
+
 async def fetch_image(url: str) -> Tuple[bytes, str]:
     """
     Download image from HTTP/HTTPS URL.
@@ -359,18 +440,23 @@ async def fetch_image(url: str) -> Tuple[bytes, str]:
     if not url.startswith(('http://', 'https://')):
         raise InvalidImageError(f"Invalid URL scheme: {url}. Only http:// and https:// supported")
 
-    # SSRF Protection: Block private IP ranges (Opus 4.5 Critical Fix C1)
-    is_safe, error_msg = is_safe_url(url)
-    if not is_safe:
-        raise InvalidImageError(f"URL blocked by SSRF protection: {error_msg}")
+    # S1 SSRF Protection: Resolve DNS and validate IP, get pinned IP for DNS rebinding protection
+    # This validates SSRF AND returns the IP to pin curl's DNS resolution
+    hostname, pinned_ip, port = resolve_and_validate_url(url)
 
     try:
         # M5: Improved timeout handling with separate connect/total timeouts
         # Use asyncio subprocess to run curl with timeout
         # This avoids adding httpx/aiohttp dependencies
+        #
+        # S1 Security Fix (Opus review):
+        # - Removed '-L' (no redirects) - prevents redirect-based SSRF bypass
+        # - Added '--max-redirs 0' - explicitly reject any redirects
+        # - Added '--resolve' with actual port - DNS pinning prevents DNS rebinding
         process = await asyncio.create_subprocess_exec(
             'curl',
-            '-L',  # Follow redirects
+            '--max-redirs', '0',  # S1: Block redirects (SSRF bypass prevention)
+            '--resolve', f'{hostname}:{port}:{pinned_ip}',  # S1: DNS pin with actual port
             '-s',  # Silent
             '-f',  # Fail on HTTP errors
             '--connect-timeout', '5',  # Connection timeout (separate from transfer)
@@ -388,6 +474,12 @@ async def fetch_image(url: str) -> Tuple[bytes, str]:
 
         if process.returncode != 0:
             error_msg = stderr.decode('utf-8', errors='replace').strip()
+            # S1: Detect redirect rejection (curl exit code 47 or redirect-related errors)
+            if 'redirect' in error_msg.lower() or process.returncode == 47:
+                raise InvalidImageError(
+                    f"URL attempted redirect (blocked for SSRF protection): {url}. "
+                    f"Direct image URLs only - no redirects allowed."
+                )
             raise ImageDownloadError(
                 f"Failed to download image from {url}: {error_msg}"
             )

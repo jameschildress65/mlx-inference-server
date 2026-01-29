@@ -316,6 +316,7 @@ class VisionInferenceBackend(InferenceBackend):
         - PIL decompression bomb protection (set at module load - Opus H3)
         - Base64 bomb protection (size limits before decode)
         - Image count limits
+        - S3: Proper cleanup on failure to prevent OOM
 
         Args:
             image_data_list: List of ImageData from IPC
@@ -339,55 +340,62 @@ class VisionInferenceBackend(InferenceBackend):
         # PIL.Image.MAX_IMAGE_PIXELS already set at module load (Opus H3)
 
         images = []
-        for idx, img_data in enumerate(image_data_list):
-            try:
-                if img_data.type == 'inline':
-                    # Base64 bomb protection: check encoded size before decode
-                    encoded_size = len(img_data.data)
-                    if encoded_size > MAX_BASE64_SIZE * 4 / 3:  # Base64 expands by ~1.33x
+        try:
+            for idx, img_data in enumerate(image_data_list):
+                try:
+                    if img_data.type == 'inline':
+                        # Base64 bomb protection: check encoded size before decode
+                        encoded_size = len(img_data.data)
+                        if encoded_size > MAX_BASE64_SIZE * 4 / 3:  # Base64 expands by ~1.33x
+                            raise ValueError(
+                                f"Image {idx}: base64 data too large "
+                                f"({encoded_size / 1024 / 1024:.1f}MB exceeds {MAX_BASE64_SIZE / 1024 / 1024:.0f}MB limit)"
+                            )
+
+                        # Decode base64
+                        image_bytes = base64.b64decode(img_data.data)
+
+                        # Check decoded size
+                        decoded_size = len(image_bytes)
+                        if decoded_size > MAX_BASE64_SIZE:
+                            raise ValueError(
+                                f"Image {idx}: decoded size too large "
+                                f"({decoded_size / 1024 / 1024:.1f}MB exceeds {MAX_BASE64_SIZE / 1024 / 1024:.0f}MB limit)"
+                            )
+
+                        # S3 Fix: Use load() instead of verify() + re-open
+                        # verify() then re-open doubles memory during decode
+                        # load() forces full decode in one pass and catches corruption
+                        pil_img = Image.open(io.BytesIO(image_bytes))
+                        pil_img.load()  # Forces full decode, validates image
+
+                        images.append(pil_img)
+
+                    elif img_data.type == 'shmem':
+                        # C3 fix: shmem images are now resolved to inline in WorkerProcess._resolve_shmem_images()
+                        # before being passed to the inference engine. This should never be reached.
                         raise ValueError(
-                            f"Image {idx}: base64 data too large "
-                            f"({encoded_size / 1024 / 1024:.1f}MB exceeds {MAX_BASE64_SIZE / 1024 / 1024:.0f}MB limit)"
+                            f"Image {idx}: shmem image should have been resolved to inline by worker. "
+                            "This indicates a bug in the worker request handling."
                         )
+                    else:
+                        raise ValueError(f"Image {idx}: Unknown image type: {img_data.type}")
 
-                    # Decode base64
-                    image_bytes = base64.b64decode(img_data.data)
+                except ValueError:
+                    # Re-raise our validation errors
+                    raise
+                except Exception as e:
+                    # Wrap other errors with context
+                    raise ValueError(f"Image {idx}: Failed to decode - {str(e)}")
 
-                    # Check decoded size
-                    decoded_size = len(image_bytes)
-                    if decoded_size > MAX_BASE64_SIZE:
-                        raise ValueError(
-                            f"Image {idx}: decoded size too large "
-                            f"({decoded_size / 1024 / 1024:.1f}MB exceeds {MAX_BASE64_SIZE / 1024 / 1024:.0f}MB limit)"
-                        )
-
-                    # Open image with PIL (protected by MAX_IMAGE_PIXELS)
-                    pil_img = Image.open(io.BytesIO(image_bytes))
-
-                    # Verify image loaded successfully
-                    pil_img.verify()
-
-                    # Re-open after verify (verify() consumes the file)
-                    pil_img = Image.open(io.BytesIO(image_bytes))
-
-                    images.append(pil_img)
-
-                elif img_data.type == 'shmem':
-                    # C3 fix: shmem images are now resolved to inline in WorkerProcess._resolve_shmem_images()
-                    # before being passed to the inference engine. This should never be reached.
-                    raise ValueError(
-                        f"Image {idx}: shmem image should have been resolved to inline by worker. "
-                        "This indicates a bug in the worker request handling."
-                    )
-                else:
-                    raise ValueError(f"Image {idx}: Unknown image type: {img_data.type}")
-
-            except ValueError:
-                # Re-raise our validation errors
-                raise
-            except Exception as e:
-                # Wrap other errors with context
-                raise ValueError(f"Image {idx}: Failed to decode - {str(e)}")
+        except Exception:
+            # S3 Fix: Clean up already-decoded images on failure to prevent OOM
+            for img in images:
+                try:
+                    img.close()
+                except Exception:
+                    pass
+            raise
 
         return images
 
