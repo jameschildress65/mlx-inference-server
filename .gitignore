@@ -152,3 +152,8 @@ docs/TESTED-AND-REJECTED.md
 docs/benchmarks/
 docs/opus-reviews/
 docs/analysis/
+docs/NASA-GRADE-REVIEW-WORKFLOW.md
+
+# Review scripts (contain API keys - NEVER commit)
+review_*.py
+submit_*.py
