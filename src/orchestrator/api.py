@@ -189,13 +189,17 @@ def clear_tokenizer_cache():
 # Request/Response Models (OpenAI-compatible)
 
 class CompletionRequest(BaseModel):
-    """OpenAI-compatible completion request."""
+    """OpenAI-compatible completion request.
+
+    S4 Security Fix: All generation parameters have bounds validation
+    to prevent resource exhaustion and invalid model behavior.
+    """
     model: str
-    prompt: str
-    max_tokens: int = 100
-    temperature: float = 0.7
-    top_p: float = 1.0
-    repetition_penalty: float = 1.1
+    prompt: str = Field(..., min_length=1, max_length=100000)  # S4: Limit prompt size
+    max_tokens: int = Field(default=100, ge=1, le=32768)  # S4: Reasonable token limit
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)  # S4: Valid temp range
+    top_p: float = Field(default=1.0, ge=0.0, le=1.0)  # S4: Valid probability
+    repetition_penalty: float = Field(default=1.1, ge=0.0, le=10.0)  # S4: Sane range
     stream: bool = False
 
 
@@ -239,13 +243,17 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    """OpenAI-compatible chat completion request."""
+    """OpenAI-compatible chat completion request.
+
+    S4 Security Fix: All generation parameters have bounds validation
+    to prevent resource exhaustion and invalid model behavior.
+    """
     model: str
-    messages: list[ChatMessage]
-    max_tokens: int = 100
-    temperature: float = 0.7
-    top_p: float = 1.0
-    repetition_penalty: float = 1.1
+    messages: list[ChatMessage] = Field(..., min_length=1, max_length=100)  # S4: Limit message count
+    max_tokens: int = Field(default=100, ge=1, le=32768)  # S4: Reasonable token limit
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)  # S4: Valid temp range
+    top_p: float = Field(default=1.0, ge=0.0, le=1.0)  # S4: Valid probability
+    repetition_penalty: float = Field(default=1.1, ge=0.0, le=10.0)  # S4: Sane range
     stream: bool = False
 
 
