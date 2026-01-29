@@ -13,6 +13,7 @@ import signal
 import time
 import json
 import atexit
+import hashlib
 import psutil
 from pathlib import Path
 from typing import Optional, Set
@@ -20,6 +21,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import logging
 import fcntl
+
+try:
+    import posix_ipc
+    HAS_POSIX_IPC = True
+except ImportError:
+    posix_ipc = None
+    HAS_POSIX_IPC = False
 
 logger = logging.getLogger(__name__)
 
@@ -150,10 +158,10 @@ class ProcessRegistry:
 
                         killed_count += 1
 
-                        # Clean up shared memory
+                        # Clean up shared memory and semaphores (C1 fix)
                         shm_name = record.get('shm_name')
                         if shm_name:
-                            self._cleanup_shm(shm_name)
+                            self._cleanup_ipc_resources(shm_name)
                     else:
                         logger.info(f"PID {pid} is not a worker, skipping")
 
@@ -173,8 +181,42 @@ class ProcessRegistry:
         finally:
             self._release_lock(lock_fd)
 
-    def _cleanup_shm(self, shm_name: str):
-        """Clean up shared memory segment."""
+    def _cleanup_ipc_resources(self, shm_name: str):
+        """
+        Clean up all IPC resources associated with a worker.
+
+        Resources cleaned:
+        1. POSIX semaphores (req and resp) - cleaned FIRST
+        2. Shared memory segment
+
+        Semaphore names are derived deterministically from shm_name
+        using the same formula as SharedMemoryBridge.__init__.
+
+        C1 Fix: Previously only cleaned shared memory, leaving semaphores
+        orphaned after worker crashes. Now cleans both.
+        """
+        # Skip semaphore cleanup if not using shared memory IPC
+        # (stdio mode uses "stdio" as shm_name, not "mlx_*")
+        if shm_name and shm_name.startswith("mlx_") and HAS_POSIX_IPC:
+            # Derive semaphore names using same formula as SharedMemoryBridge
+            name_hash = hashlib.sha256(shm_name.encode()).hexdigest()[:16]
+            sem_names = [f"/r{name_hash}", f"/s{name_hash}"]
+
+            for sem_name in sem_names:
+                try:
+                    sem = posix_ipc.Semaphore(sem_name)
+                    sem.close()
+                    sem.unlink()
+                    logger.info(f"Cleaned up orphaned semaphore: {sem_name}")
+                except posix_ipc.ExistentialError:
+                    # Already cleaned up - this is fine
+                    logger.debug(f"Semaphore already cleaned: {sem_name}")
+                except Exception as e:
+                    # Log but continue - don't let semaphore cleanup failure
+                    # prevent shared memory cleanup
+                    logger.warning(f"Error cleaning up semaphore {sem_name}: {e}")
+
+        # Clean up shared memory segment
         try:
             from multiprocessing import shared_memory
             shm = shared_memory.SharedMemory(name=shm_name)
@@ -182,7 +224,8 @@ class ProcessRegistry:
             shm.unlink()
             logger.info(f"Cleaned up orphaned SHM: {shm_name}")
         except FileNotFoundError:
-            pass  # Already cleaned up
+            # Already cleaned up - this is fine
+            logger.debug(f"SHM already cleaned: {shm_name}")
         except Exception as e:
             logger.warning(f"Error cleaning up SHM {shm_name}: {e}")
 
@@ -246,15 +289,19 @@ class ProcessRegistry:
 
         Returns True if worker was terminated.
         """
+        # Get worker info for IPC cleanup BEFORE checking if process exists
+        # (we need to clean up IPC resources even if process is already dead)
+        worker = self._workers.get(pid)
+        shm_name = worker.shm_name if worker else None
+
         try:
             proc = psutil.Process(pid)
         except psutil.NoSuchProcess:
+            # Process already dead - still need to clean up IPC resources
+            if shm_name:
+                self._cleanup_ipc_resources(shm_name)
             self.unregister_worker(pid)
             return True
-
-        # Get worker info for SHM cleanup
-        worker = self._workers.get(pid)
-        shm_name = worker.shm_name if worker else None
 
         try:
             # Step 1: Graceful termination
@@ -271,9 +318,9 @@ class ProcessRegistry:
                 proc.wait(timeout=2.0)
                 logger.info(f"Worker pid={pid} force killed")
 
-            # Cleanup
+            # Cleanup shared memory and semaphores (C1 fix)
             if shm_name:
-                self._cleanup_shm(shm_name)
+                self._cleanup_ipc_resources(shm_name)
             self.unregister_worker(pid)
             return True
 
