@@ -765,6 +765,16 @@ class WorkerManager:
                         )
                         self._cleanup_dead_worker()
                     raise
+                except BaseException:
+                    # C4 Fix (Opus/DeepSeek review): Handle ALL exceptions including
+                    # KeyboardInterrupt, SystemExit, and unexpected errors.
+                    # Ensures IPC cleanup happens even on Ctrl+C or bugs.
+                    if self.active_worker and self.active_worker.poll() is not None:
+                        logger.warning(
+                            f"Cleaning up dead worker after unexpected error"
+                        )
+                        self._cleanup_dead_worker()
+                    raise
 
     def health_check(self) -> Dict[str, Any]:
         """

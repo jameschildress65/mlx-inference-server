@@ -204,9 +204,10 @@ class ProcessRegistry:
 
             for sem_name in sem_names:
                 try:
-                    sem = posix_ipc.Semaphore(sem_name)
-                    sem.close()
-                    sem.unlink()
+                    # C1 Fix (Opus review): Use unlink_semaphore() directly
+                    # This avoids TOCTOU race between open/close/unlink
+                    # unlink_semaphore removes from filesystem without opening
+                    posix_ipc.unlink_semaphore(sem_name)
                     logger.info(f"Cleaned up orphaned semaphore: {sem_name}")
                 except posix_ipc.ExistentialError:
                     # Already cleaned up - this is fine

@@ -374,8 +374,9 @@ class SharedMemoryBridge:
         """
         Read image data from shared memory image buffer.
 
-        C3 fix: Validates generation counter to detect stale reads when
-        buffer was reset during concurrent requests.
+        C3 fix: Uses seqlock pattern (check-read-check) to detect stale reads
+        when buffer was reset during concurrent requests. The double-check
+        ensures we didn't read data that was overwritten mid-read.
 
         Args:
             offset: Starting offset in image buffer
@@ -388,12 +389,12 @@ class SharedMemoryBridge:
         Raises:
             ValueError: If offset/length invalid or generation mismatch (stale data)
         """
-        # C3 fix: Validate generation FIRST to detect stale reads
-        current_generation = struct.unpack_from('Q', self.image_buffer, self.IMAGE_GENERATION_OFFSET)[0]
-        if expected_generation != current_generation:
+        # C3 fix (seqlock pattern): Check generation BEFORE read
+        gen_before = struct.unpack_from('Q', self.image_buffer, self.IMAGE_GENERATION_OFFSET)[0]
+        if expected_generation != gen_before:
             raise ValueError(
                 f"Image buffer was reset: expected generation {expected_generation}, "
-                f"current generation {current_generation}. Image data is stale."
+                f"current generation {gen_before}. Image data is stale."
             )
 
         # Validate bounds
@@ -408,6 +409,16 @@ class SharedMemoryBridge:
 
         # Read from buffer
         data = bytes(self.image_buffer[offset:offset + length])
+
+        # C3 fix (seqlock pattern): Check generation AFTER read
+        # This detects if buffer was reset during our read operation
+        gen_after = struct.unpack_from('Q', self.image_buffer, self.IMAGE_GENERATION_OFFSET)[0]
+        if gen_before != gen_after:
+            raise ValueError(
+                f"Image buffer was reset during read: generation changed from "
+                f"{gen_before} to {gen_after}. Data may be corrupted."
+            )
+
         logger.debug(f"Read image: {length} bytes from offset {offset}, generation={expected_generation}")
         return data
 
