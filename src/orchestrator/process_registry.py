@@ -13,7 +13,6 @@ import signal
 import time
 import json
 import atexit
-import hashlib
 import psutil
 from pathlib import Path
 from typing import Optional, Set
@@ -28,6 +27,8 @@ try:
 except ImportError:
     posix_ipc = None
     HAS_POSIX_IPC = False
+
+from src.ipc.semaphore_utils import derive_semaphore_names
 
 logger = logging.getLogger(__name__)
 
@@ -198,9 +199,8 @@ class ProcessRegistry:
         # Skip semaphore cleanup if not using shared memory IPC
         # (stdio mode uses "stdio" as shm_name, not "mlx_*")
         if shm_name and shm_name.startswith("mlx_") and HAS_POSIX_IPC:
-            # Derive semaphore names using same formula as SharedMemoryBridge
-            name_hash = hashlib.sha256(shm_name.encode()).hexdigest()[:16]
-            sem_names = [f"/r{name_hash}", f"/s{name_hash}"]
+            # H1 fix: Use shared utility for deterministic name derivation
+            sem_names = list(derive_semaphore_names(shm_name))
 
             for sem_name in sem_names:
                 try:

@@ -7,8 +7,9 @@ Tests that _cleanup_ipc_resources() properly cleans both:
 """
 
 import pytest
-import hashlib
 from multiprocessing import shared_memory
+
+from src.ipc.semaphore_utils import derive_semaphore_names
 
 try:
     import posix_ipc
@@ -28,9 +29,7 @@ class TestSemaphoreCleanup:
 
         # Create test resources manually (simulating what SharedMemoryBridge does)
         shm_name = "mlx_test_c1_cleanup_001"
-        name_hash = hashlib.sha256(shm_name.encode()).hexdigest()[:16]
-        req_sem_name = f"/r{name_hash}"
-        resp_sem_name = f"/s{name_hash}"
+        req_sem_name, resp_sem_name = derive_semaphore_names(shm_name)
 
         # Create shared memory
         shm = shared_memory.SharedMemory(name=shm_name, create=True, size=1024)
@@ -82,9 +81,7 @@ class TestSemaphoreCleanup:
 
         # Create only semaphores, no shared memory
         shm_name = "mlx_test_c1_no_shm_003"
-        name_hash = hashlib.sha256(shm_name.encode()).hexdigest()[:16]
-        req_sem_name = f"/r{name_hash}"
-        resp_sem_name = f"/s{name_hash}"
+        req_sem_name, resp_sem_name = derive_semaphore_names(shm_name)
 
         req_sem = posix_ipc.Semaphore(req_sem_name, flags=posix_ipc.O_CREAT, initial_value=1)
         resp_sem = posix_ipc.Semaphore(resp_sem_name, flags=posix_ipc.O_CREAT, initial_value=1)
@@ -121,19 +118,32 @@ class TestSemaphoreCleanup:
         # No assertion needed - just verify no exception
 
     def test_semaphore_name_derivation_matches_bridge(self):
-        """Verify semaphore name derivation matches SharedMemoryBridge."""
-        # This test ensures the hash formula stays in sync
+        """Verify semaphore name derivation format is correct."""
+        # H1 fix: Now both use shared derive_semaphore_names() utility
         shm_name = "mlx_test_hash_match"
-        name_hash = hashlib.sha256(shm_name.encode()).hexdigest()[:16]
+        req_sem, resp_sem = derive_semaphore_names(shm_name)
 
-        # These should match what SharedMemoryBridge uses
-        expected_req = f"/r{name_hash}"
-        expected_resp = f"/s{name_hash}"
+        assert len(req_sem) == 18  # /r + 16 hex chars
+        assert len(resp_sem) == 18  # /s + 16 hex chars
+        assert req_sem.startswith("/r")
+        assert resp_sem.startswith("/s")
 
-        assert len(expected_req) == 18  # /r + 16 hex chars
-        assert len(expected_resp) == 18  # /s + 16 hex chars
-        assert expected_req.startswith("/r")
-        assert expected_resp.startswith("/s")
+    def test_derive_semaphore_names_is_deterministic(self):
+        """Verify same input always produces same output."""
+        shm_name = "mlx_deterministic_test"
+        result1 = derive_semaphore_names(shm_name)
+        result2 = derive_semaphore_names(shm_name)
+        assert result1 == result2
+
+    def test_derive_semaphore_names_rejects_empty(self):
+        """Verify empty shm_name raises ValueError."""
+        with pytest.raises(ValueError, match="non-empty"):
+            derive_semaphore_names("")
+
+    def test_derive_semaphore_names_rejects_none(self):
+        """Verify None shm_name raises TypeError."""
+        with pytest.raises(TypeError, match="must be str"):
+            derive_semaphore_names(None)
 
 
 class TestCleanupIntegration:
