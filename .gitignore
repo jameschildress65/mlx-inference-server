@@ -79,16 +79,9 @@ private/
 opus-submissions/
 
 # Internal documentation (keep local, not for public)
-docs/sessions/              # Session notes
-docs/orchestrator-hang-root-cause.md  # Internal analysis
-docs/PROJECT-STATUS.md      # Project tracking
 docs/PHASE3-*.md           # Phase documentation
 docs/DEPLOYMENT-*.md       # Internal deployment notes
 docs/PERFORMANCE-*.md      # Internal performance notes
-docs/TESTED-AND-REJECTED.md  # Tested and rejected optimization approaches
-docs/benchmarks/           # Internal benchmark results
-docs/opus-reviews/           # Opus code reviews (internal)
-docs/analysis/             # Internal test/monitoring data
 docs/worker-hang*.md       # Internal debugging investigations
 
 # Internal analysis files (root level)
@@ -97,3 +90,65 @@ mls_request_analysis*.txt
 
 # Claude Code project settings
 .claude/
+
+# Additional internal files (added 2026-01-29)
+.claudeignore
+.git-rewrite/
+OPUS-*.md
+OPUS-*.txt
+THUNDERBOLT-*.md
+check_batch_loop.sh
+submit_opus_review.py
+submit_to_opus.py
+worker_hang_diagnostic*.md
+com.mlx.inference-server.plist
+
+# Internal bin scripts
+bin/check-opus-batch.sh
+bin/deploy-fresh.sh
+bin/mlx-inference-server-daemon*.sh
+bin/mlx-server-daemon.sh
+bin/mlx-server-stop.sh
+bin/test-deployment.sh
+
+# Internal docs
+docs/BUG-*.md
+docs/HOW-TO-*.md
+docs/OPUS-*.md
+docs/UNAUTHORIZED-*.md
+docs/VISION-*.md
+docs/PHASE*.md
+docs/code-review-*.md
+docs/deepseek-*.md
+docs/deepseek-*.json
+docs/deepseek-*.jsonl
+docs/opus-*.md
+docs/opus-*.json
+docs/opus-*.jsonl
+docs/opus-*.txt
+docs/batch_monitor.log
+
+# Internal test files
+tests/integration/test_isolated_*.py
+tests/integration/test_load_capacity.py
+tests/integration/test_opus_temp.py
+tests/integration/test_phase1_stress.py
+tests/unit/test_extended_model_provider.py
+tests/unit/test_idle_monitor.py
+tests/unit/test_phase1_nasa.py
+tests/unit/test_request_tracker.py
+tests/unit/test_server_config.py
+
+# Catch remaining internal docs
+docs/DEPLOYMENT-*.md
+docs/PERFORMANCE-*.md
+docs/worker-hang-*.md
+
+# Internal docs (clean patterns)
+docs/sessions/
+docs/orchestrator-hang-root-cause.md
+docs/PROJECT-STATUS.md
+docs/TESTED-AND-REJECTED.md
+docs/benchmarks/
+docs/opus-reviews/
+docs/analysis/
