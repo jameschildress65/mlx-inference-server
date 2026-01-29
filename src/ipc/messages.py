@@ -51,11 +51,15 @@ class ImageData(BaseModel):
     Two-tier strategy:
     - Small images (<500KB): inline base64 encoding
     - Large images (≥500KB): shared memory with offset/length
+
+    C3 fix: Added generation field for shmem mode to detect stale reads
+    when image buffer is reset during concurrent requests.
     """
     type: Literal["inline", "shmem"] = "inline"
     data: Optional[str] = None  # base64 encoded image (inline mode)
     offset: Optional[int] = None  # shared memory offset (shmem mode)
     length: Optional[int] = None  # shared memory length (shmem mode)
+    generation: Optional[int] = None  # C3: generation counter (shmem mode)
     format: str = "jpeg"  # Image format: jpeg, png, webp, bmp, etc.
 
 

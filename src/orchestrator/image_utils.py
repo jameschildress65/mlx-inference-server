@@ -678,16 +678,18 @@ async def prepare_images(content_blocks: list, bridge=None) -> list:
                     "Large image requires shared memory bridge, but none provided"
                 )
 
-            offset, length = bridge.write_image(image_bytes)
+            # C3 fix: write_image now returns generation for stale read detection
+            offset, length, generation = bridge.write_image(image_bytes)
             image_data = ImageData(
                 type='shmem',
                 offset=offset,
                 length=length,
+                generation=generation,  # C3: Include generation for worker validation
                 format=format_str
             )
             logger.debug(
                 f"Image {len(image_data_list)}: shmem, {len(image_bytes)} bytes "
-                f"at offset {offset}"
+                f"at offset {offset}, generation={generation}"
             )
 
         image_data_list.append(image_data)
