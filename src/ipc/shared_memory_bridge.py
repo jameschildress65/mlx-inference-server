@@ -20,6 +20,7 @@ import time
 import logging
 import subprocess
 import hashlib
+import threading
 from multiprocessing import shared_memory
 from multiprocessing import resource_tracker
 from typing import Optional, Union
@@ -110,6 +111,11 @@ class SharedMemoryBridge:
 
     RING_SIZE = 4 * 1024 * 1024  # 4MB per direction
     IMAGE_BUFFER_SIZE = 16 * 1024 * 1024  # 16MB for vision/multimodal (large images ≥500KB)
+
+    # C3 fix: Generation counter for detecting stale image reads
+    IMAGE_GENERATION_OFFSET = 0  # Generation counter at start of image buffer
+    IMAGE_GENERATION_SIZE = 8  # uint64
+    IMAGE_DATA_OFFSET = 8  # Image data starts after generation counter
     CACHE_LINE_SIZE = _detect_cache_line_size()  # 128 on Apple Silicon, 64 on x86_64
     HEADER_SIZE = 2 * CACHE_LINE_SIZE  # Separate cache lines for writer/reader (no false sharing)
 
@@ -135,6 +141,7 @@ class SharedMemoryBridge:
         self.name = name  # Legacy, unused
         self.is_server = is_server
         self._closed = False  # Track cleanup state to prevent double-cleanup
+        self._close_lock = threading.Lock()  # C2 fix: Protect close() from TOCTOU race
 
         # Calculate total size needed
         # Layout: [request_ring][response_ring][image_buffer]
@@ -216,7 +223,11 @@ class SharedMemoryBridge:
         # Shared by both directions (orchestrator can write images for worker to read)
         image_offset = 2 * (self.HEADER_SIZE + self.RING_SIZE)
         self.image_buffer = buf[image_offset:image_offset + self.IMAGE_BUFFER_SIZE]
-        self.image_buffer_offset = 0  # Track next write position (simple linear allocation)
+        # C3 fix: Track next write position AFTER generation counter header
+        self.image_buffer_offset = self.IMAGE_DATA_OFFSET
+        # Initialize generation counter to 0 (server only)
+        if self.is_server:
+            struct.pack_into('Q', self.image_buffer, self.IMAGE_GENERATION_OFFSET, 0)
 
     def send_request(self, data: bytes, timeout: float = 30.0) -> bool:
         """
@@ -291,17 +302,21 @@ class SharedMemoryBridge:
             self.resp_header, self.resp_data, timeout, self.resp_sem
         )
 
-    def write_image(self, data: bytes) -> tuple[int, int]:
+    def write_image(self, data: bytes) -> tuple[int, int, int]:
         """
         Write image data to shared memory image buffer.
 
         Used for large images (≥500KB) that exceed inline base64 limits.
 
+        C3 fix: Returns generation counter for detecting stale reads when
+        buffer is reset during concurrent requests.
+
         Args:
             data: Raw image bytes (JPEG, PNG, etc.)
 
         Returns:
-            Tuple of (offset, length) for referencing in ImageData
+            Tuple of (offset, length, generation) for referencing in ImageData.
+            The generation counter detects if buffer was reset since write.
 
         Raises:
             ValueError: If image too large or buffer full
@@ -319,21 +334,31 @@ class SharedMemoryBridge:
                 f"Image too large: {data_len} bytes (max={max_image_size})"
             )
 
+        # Calculate effective buffer size (excluding generation header)
+        effective_buffer_size = self.IMAGE_BUFFER_SIZE - self.IMAGE_DATA_OFFSET
+
         # Check if it fits in buffer
         if self.image_buffer_offset + data_len > self.IMAGE_BUFFER_SIZE:
-            # Buffer full - reset to beginning (simple strategy for Phase 1)
-            # TODO Phase 4: Implement proper memory management with reference counting
+            # Buffer full - reset to beginning with NEW generation (C3 fix)
+            # Read current generation, increment, write back
+            current_gen = struct.unpack_from('Q', self.image_buffer, self.IMAGE_GENERATION_OFFSET)[0]
+            new_gen = current_gen + 1
+            struct.pack_into('Q', self.image_buffer, self.IMAGE_GENERATION_OFFSET, new_gen)
+
             logger.warning(
                 f"Image buffer full at offset {self.image_buffer_offset}, "
-                f"resetting to beginning"
+                f"resetting to beginning (generation={new_gen})"
             )
-            self.image_buffer_offset = 0
+            self.image_buffer_offset = self.IMAGE_DATA_OFFSET
 
             # Re-check after reset
-            if data_len > self.IMAGE_BUFFER_SIZE:
+            if data_len > effective_buffer_size:
                 raise ValueError(
-                    f"Image larger than buffer: {data_len} > {self.IMAGE_BUFFER_SIZE}"
+                    f"Image larger than buffer: {data_len} > {effective_buffer_size}"
                 )
+
+        # Read current generation for return value
+        generation = struct.unpack_from('Q', self.image_buffer, self.IMAGE_GENERATION_OFFSET)[0]
 
         # Write image data at current offset
         offset = self.image_buffer_offset
@@ -342,23 +367,36 @@ class SharedMemoryBridge:
         # Update offset for next write
         self.image_buffer_offset += data_len
 
-        logger.debug(f"Wrote image: {data_len} bytes at offset {offset}")
-        return (offset, data_len)
+        logger.debug(f"Wrote image: {data_len} bytes at offset {offset}, generation={generation}")
+        return (offset, data_len, generation)
 
-    def read_image(self, offset: int, length: int) -> bytes:
+    def read_image(self, offset: int, length: int, expected_generation: int) -> bytes:
         """
         Read image data from shared memory image buffer.
+
+        C3 fix: Uses seqlock pattern (check-read-check) to detect stale reads
+        when buffer was reset during concurrent requests. The double-check
+        ensures we didn't read data that was overwritten mid-read.
 
         Args:
             offset: Starting offset in image buffer
             length: Number of bytes to read
+            expected_generation: Generation counter from write_image()
 
         Returns:
             Raw image bytes
 
         Raises:
-            ValueError: If offset/length invalid
+            ValueError: If offset/length invalid or generation mismatch (stale data)
         """
+        # C3 fix (seqlock pattern): Check generation BEFORE read
+        gen_before = struct.unpack_from('Q', self.image_buffer, self.IMAGE_GENERATION_OFFSET)[0]
+        if expected_generation != gen_before:
+            raise ValueError(
+                f"Image buffer was reset: expected generation {expected_generation}, "
+                f"current generation {gen_before}. Image data is stale."
+            )
+
         # Validate bounds
         if offset < 0 or length < 0:
             raise ValueError(f"Invalid offset/length: {offset}/{length}")
@@ -371,7 +409,17 @@ class SharedMemoryBridge:
 
         # Read from buffer
         data = bytes(self.image_buffer[offset:offset + length])
-        logger.debug(f"Read image: {length} bytes from offset {offset}")
+
+        # C3 fix (seqlock pattern): Check generation AFTER read
+        # This detects if buffer was reset during our read operation
+        gen_after = struct.unpack_from('Q', self.image_buffer, self.IMAGE_GENERATION_OFFSET)[0]
+        if gen_before != gen_after:
+            raise ValueError(
+                f"Image buffer was reset during read: generation changed from "
+                f"{gen_before} to {gen_after}. Data may be corrupted."
+            )
+
+        logger.debug(f"Read image: {length} bytes from offset {offset}, generation={expected_generation}")
         return data
 
     def _write_ring(self, header, data_buf, data: bytes, semaphore: posix_ipc.Semaphore) -> bool:
@@ -580,11 +628,17 @@ class SharedMemoryBridge:
             semaphore.release()
 
     def close(self):
-        """Clean up resources including POSIX semaphores."""
-        # Prevent double-cleanup (fixes worker crash bug)
-        if self._closed:
-            return
-        self._closed = True
+        """Clean up resources including POSIX semaphores.
+
+        C2 fix: Thread-safe close using lock to prevent TOCTOU race between
+        explicit close() and __del__() during garbage collection.
+        """
+        # Thread-safe check-and-set of _closed flag
+        # Lock ONLY protects the flag, NOT the cleanup I/O (prevents deadlock)
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
 
         # PHASE 2: Release memoryview references before closing shared memory
         # This prevents "cannot close exported pointers exist" errors
@@ -633,9 +687,14 @@ class SharedMemoryBridge:
         return False  # Don't suppress exceptions
 
     def __del__(self):
-        """Destructor cleanup (best effort)."""
+        """Destructor cleanup (best effort).
+
+        C2 fix: Guard against partially initialized objects where
+        _close_lock may not exist if __init__ failed early.
+        """
         try:
-            self.close()
+            if hasattr(self, '_close_lock'):
+                self.close()
         except Exception:
             pass  # Ignore errors during cleanup
 

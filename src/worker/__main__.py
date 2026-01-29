@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.ipc.stdio_bridge import WorkerStdioHandler
 from src.ipc.shared_memory_bridge import SharedMemoryBridge, WorkerSharedMemoryHandler
-from src.ipc.messages import CompletionRequest, PingMessage, ShutdownMessage
+from src.ipc.messages import CompletionRequest, PingMessage, ShutdownMessage, ImageData
 from src.worker.model_loader import ModelLoader
 from src.worker.inference import InferenceEngine
 from src.worker.generation_monitor import get_monitor, GenerationTimeout
@@ -162,6 +162,63 @@ class WorkerProcess:
         self._cleanup()
         sys.exit(0)
 
+    def _resolve_shmem_images(self, images: list) -> list:
+        """
+        C3 fix: Resolve shmem images to inline images before passing to inference engine.
+
+        Reads image data from shared memory and converts to inline base64 format.
+        Validates generation counter to detect stale reads from buffer resets.
+
+        Args:
+            images: List of ImageData objects (may contain shmem references)
+
+        Returns:
+            List of ImageData objects with shmem converted to inline
+
+        Raises:
+            ValueError: If generation mismatch (stale data) or read error
+        """
+        import base64
+
+        if not images:
+            return images
+
+        resolved = []
+        for idx, img in enumerate(images):
+            if img.type == 'shmem':
+                if self.shmem_bridge is None:
+                    raise ValueError(f"Image {idx}: shmem image but no bridge available")
+
+                if img.generation is None:
+                    raise ValueError(f"Image {idx}: shmem image missing generation counter")
+
+                # Read from shared memory with generation validation (C3 fix)
+                try:
+                    image_bytes = self.shmem_bridge.read_image(
+                        img.offset,
+                        img.length,
+                        img.generation
+                    )
+                except ValueError as e:
+                    # Generation mismatch = stale data, or bounds error
+                    raise ValueError(f"Image {idx}: {e}")
+
+                # Convert to inline base64
+                base64_data = base64.b64encode(image_bytes).decode('utf-8')
+                resolved.append(ImageData(
+                    type='inline',
+                    data=base64_data,
+                    format=img.format
+                ))
+                logger.debug(
+                    f"Resolved shmem image {idx}: {img.length} bytes, generation={img.generation}"
+                )
+            else:
+                # Already inline, pass through
+                resolved.append(img)
+
+        return resolved
+
     def run(self):
         """Main worker loop."""
         try:
@@ -209,6 +266,10 @@ class WorkerProcess:
                 elif isinstance(request, CompletionRequest):
                     # Generate completion with monitoring
                     try:
+                        # C3 fix: Resolve shmem images to inline before processing
+                        # This reads from shared memory with generation validation
+                        resolved_images = self._resolve_shmem_images(request.images)
+
                         with self.gen_monitor.monitor_generation(
                             prompt_length=len(request.prompt),
                             max_tokens=request.max_tokens,
@@ -222,7 +283,7 @@ class WorkerProcess:
                                     temperature=request.temperature,
                                     top_p=request.top_p,
                                     repetition_penalty=request.repetition_penalty,
-                                    images=request.images  # Phase 3: Pass images for vision models
+                                    images=resolved_images  # C3: Use resolved images
                                 ):
                                     # Send each chunk
                                     self.handler.send_stream_chunk(
@@ -239,7 +300,7 @@ class WorkerProcess:
                                     temperature=request.temperature,
                                     top_p=request.top_p,
                                     repetition_penalty=request.repetition_penalty,
-                                    images=request.images  # Phase 3: Pass images for vision models
+                                    images=resolved_images  # C3: Use resolved images
                                 )
 
                                 self.handler.send_completion(

@@ -682,6 +682,10 @@ class WorkerManager:
         to die or be replaced before/during streaming. Now we hold the lock for the
         entire operation to guarantee worker stability.
 
+        C4 Fix: Check worker health before each receive to detect worker death early.
+        Previously, if worker crashed mid-stream, we'd wait for timeout (30-300s).
+        Now we check poll() before blocking on receive for immediate detection.
+
         Trade-off: This serializes all operations during streaming (status checks,
         health checks), but that's acceptable given single-worker design. Prevents
         worker lifecycle races during request processing.
@@ -701,6 +705,7 @@ class WorkerManager:
             NoModelLoadedError: If no worker active
             WorkerCommunicationError: If worker communication fails
             WorkerTimeoutError: If stream exceeds configured timeout
+            WorkerError: If worker dies during streaming
         """
         # DEADLOCK FIX: Track activity BEFORE acquiring main lock
         # Lock order: activity_lock → self.lock (matches unload_model_if_idle)
@@ -718,26 +723,58 @@ class WorkerManager:
                 # First chunk: Uses configured request_timeout (safety net)
                 # Subsequent chunks: 30s timeout (should be fast once streaming)
                 first_chunk = True
-                while True:
-                    if first_chunk:
-                        # Use configured timeout for first chunk (may need model init)
-                        timeout = self.config.request_timeout_seconds
-                    else:
-                        # Subsequent chunks should be fast
-                        timeout = 30
+                try:
+                    while True:
+                        # C4 Fix: Check worker health BEFORE blocking on receive
+                        # poll() is non-blocking (<1ms), returns None if alive
+                        if self.active_worker and self.active_worker.poll() is not None:
+                            returncode = self.active_worker.returncode
+                            logger.error(
+                                f"Worker died during streaming (exit code: {returncode})"
+                            )
+                            raise WorkerError(
+                                f"Worker died during streaming (exit code: {returncode}). "
+                                f"Partial response may have been sent."
+                            )
 
-                    chunk = self._receive_message(timeout=timeout)
+                        if first_chunk:
+                            # Use configured timeout for first chunk (may need model init)
+                            timeout = self.config.request_timeout_seconds
+                        else:
+                            # Subsequent chunks should be fast
+                            timeout = 30
 
-                    if chunk.type == "error":
-                        raise WorkerError(f"Worker error: {chunk.message}")
+                        chunk = self._receive_message(timeout=timeout)
 
-                    if chunk.type == "stream_chunk":
-                        yield chunk
-                        first_chunk = False  # After first chunk, use shorter timeout
-                        if chunk.done:
-                            break
-                    else:
-                        raise WorkerError(f"Expected 'stream_chunk', got '{chunk.type}'")
+                        if chunk.type == "error":
+                            raise WorkerError(f"Worker error: {chunk.message}")
+
+                        if chunk.type == "stream_chunk":
+                            yield chunk
+                            first_chunk = False  # After first chunk, use shorter timeout
+                            if chunk.done:
+                                break
+                        else:
+                            raise WorkerError(f"Expected 'stream_chunk', got '{chunk.type}'")
+
+                except (WorkerTimeoutError, WorkerCommunicationError, WorkerError):
+                    # C4 Fix: Ensure cleanup on streaming failure if worker is dead
+                    if self.active_worker and self.active_worker.poll() is not None:
+                        logger.warning(
+                            f"Cleaning up dead worker after streaming error"
+                        )
+                        self._cleanup_dead_worker()
+                    raise
+                except BaseException:
+                    # C4 Fix (Opus/DeepSeek review): Handle ALL exceptions including
+                    # KeyboardInterrupt, SystemExit, and unexpected errors.
+                    # Ensures IPC cleanup happens even on Ctrl+C or bugs.
+                    if self.active_worker and self.active_worker.poll() is not None:
+                        logger.warning(
+                            f"Cleaning up dead worker after unexpected error"
+                        )
+                        self._cleanup_dead_worker()
+                    raise
 
     def health_check(self) -> Dict[str, Any]:
         """

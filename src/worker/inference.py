@@ -373,9 +373,12 @@ class VisionInferenceBackend(InferenceBackend):
                     images.append(pil_img)
 
                 elif img_data.type == 'shmem':
-                    # Read from shared memory
-                    # TODO Phase 4: Implement shared memory reading in worker
-                    raise NotImplementedError("Shared memory images not yet supported in worker")
+                    # C3 fix: shmem images are now resolved to inline in WorkerProcess._resolve_shmem_images()
+                    # before being passed to the inference engine. This should never be reached.
+                    raise ValueError(
+                        f"Image {idx}: shmem image should have been resolved to inline by worker. "
+                        "This indicates a bug in the worker request handling."
+                    )
                 else:
                     raise ValueError(f"Image {idx}: Unknown image type: {img_data.type}")
 
