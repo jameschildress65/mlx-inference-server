@@ -20,6 +20,7 @@ import time
 import logging
 import subprocess
 import hashlib
+import threading
 from multiprocessing import shared_memory
 from multiprocessing import resource_tracker
 from typing import Optional, Union
@@ -135,6 +136,7 @@ class SharedMemoryBridge:
         self.name = name  # Legacy, unused
         self.is_server = is_server
         self._closed = False  # Track cleanup state to prevent double-cleanup
+        self._close_lock = threading.Lock()  # C2 fix: Protect close() from TOCTOU race
 
         # Calculate total size needed
         # Layout: [request_ring][response_ring][image_buffer]
@@ -580,11 +582,17 @@ class SharedMemoryBridge:
             semaphore.release()
 
     def close(self):
-        """Clean up resources including POSIX semaphores."""
-        # Prevent double-cleanup (fixes worker crash bug)
-        if self._closed:
-            return
-        self._closed = True
+        """Clean up resources including POSIX semaphores.
+
+        C2 fix: Thread-safe close using lock to prevent TOCTOU race between
+        explicit close() and __del__() during garbage collection.
+        """
+        # Thread-safe check-and-set of _closed flag
+        # Lock ONLY protects the flag, NOT the cleanup I/O (prevents deadlock)
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
 
         # PHASE 2: Release memoryview references before closing shared memory
         # This prevents "cannot close exported pointers exist" errors
@@ -633,9 +641,14 @@ class SharedMemoryBridge:
         return False  # Don't suppress exceptions
 
     def __del__(self):
-        """Destructor cleanup (best effort)."""
+        """Destructor cleanup (best effort).
+
+        C2 fix: Guard against partially initialized objects where
+        _close_lock may not exist if __init__ failed early.
+        """
         try:
-            self.close()
+            if hasattr(self, '_close_lock'):
+                self.close()
         except Exception:
             pass  # Ignore errors during cleanup
 
