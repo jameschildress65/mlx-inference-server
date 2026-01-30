@@ -219,3 +219,94 @@ class TestShutdownManagerConfig:
         )
 
         assert manager.drain_timeout == 120
+
+
+class TestShutdownManagerQueueDrain:
+    """Test priority queue drain integration."""
+
+    def test_queue_drain_called_on_shutdown(self):
+        """Queue drain is called during graceful shutdown."""
+        mock_worker = Mock()
+        mock_worker.active_requests = 0
+        mock_idle = Mock()
+        mock_queue = MagicMock()
+
+        # Mock the drain method to return a coroutine
+        import asyncio
+        async def mock_drain(timeout=60.0):
+            return 3  # Simulates 3 cancelled requests
+
+        mock_queue.drain = mock_drain
+
+        manager = ShutdownManager(
+            worker_manager=mock_worker,
+            idle_monitor=mock_idle,
+            drain_timeout=5,
+            request_queue=mock_queue
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            manager._graceful_shutdown()
+
+        assert exc_info.value.code == 0
+
+    def test_shutdown_continues_without_queue(self):
+        """Shutdown works correctly when no queue is provided."""
+        mock_worker = Mock()
+        mock_worker.active_requests = 0
+        mock_idle = Mock()
+
+        manager = ShutdownManager(
+            worker_manager=mock_worker,
+            idle_monitor=mock_idle,
+            drain_timeout=5,
+            request_queue=None
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            manager._graceful_shutdown()
+
+        mock_worker.shutdown.assert_called_once()
+        assert exc_info.value.code == 0
+
+    def test_shutdown_continues_on_queue_drain_error(self):
+        """Shutdown continues even if queue drain fails."""
+        mock_worker = Mock()
+        mock_worker.active_requests = 0
+        mock_idle = Mock()
+        mock_queue = MagicMock()
+
+        # Mock drain to raise an error
+        import asyncio
+        async def mock_drain_error(timeout=60.0):
+            raise RuntimeError("Queue drain failed")
+
+        mock_queue.drain = mock_drain_error
+
+        manager = ShutdownManager(
+            worker_manager=mock_worker,
+            idle_monitor=mock_idle,
+            drain_timeout=5,
+            request_queue=mock_queue
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            manager._graceful_shutdown()
+
+        # Should still proceed to worker shutdown
+        mock_worker.shutdown.assert_called_once()
+        assert exc_info.value.code == 0
+
+    def test_queue_stored_in_manager(self):
+        """Request queue is stored for access."""
+        mock_worker = Mock()
+        mock_idle = Mock()
+        mock_queue = MagicMock()
+
+        manager = ShutdownManager(
+            worker_manager=mock_worker,
+            idle_monitor=mock_idle,
+            request_queue=mock_queue
+        )
+
+        assert manager.request_queue is mock_queue

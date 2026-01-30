@@ -19,11 +19,15 @@ from ..ipc.shared_memory_bridge import WorkerCommunicationError
 from ..config.server_config import ServerConfig
 from .image_utils import prepare_images, ImageProcessingError
 # P0 bloat remediation: Shared helpers for endpoints
-from .request_handlers import BackpressureGuard, RequestTimer, ensure_model_loaded, RateLimitGuard
+from .request_handlers import (
+    BackpressureGuard, RequestTimer, ensure_model_loaded, RateLimitGuard,
+    QueueGuard, parse_priority
+)
 from .rate_limiter import RateLimiter, RateLimitConfig
 from .response_formatters import CompletionFormatter, ChatCompletionFormatter
 from .health_checks import check_gpu_health, check_memory_health, check_disk_health, check_worker_health
 from .prometheus_metrics import metrics_router, metrics_collector
+from .priority_queue import PriorityRequestQueue, QueueConfig, Priority
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,10 @@ _max_queue_depth = 10  # Default fallback (Phase 2.1: Overridden by config.max_c
 
 # P1: Global rate limiter instance (disabled by default for home lab)
 _rate_limiter: Optional[RateLimiter] = None
+
+# Priority request queue (replaces semaphore when enabled)
+_request_queue: Optional[PriorityRequestQueue] = None
+_queue_enabled: bool = False
 
 
 def _generate_request_id() -> str:
@@ -76,6 +84,19 @@ def _get_rate_limiter() -> RateLimiter:
         # Fallback if not initialized (shouldn't happen in normal operation)
         _rate_limiter = RateLimiter(RateLimitConfig(enabled=False))
     return _rate_limiter
+
+
+def _get_request_queue() -> Optional[PriorityRequestQueue]:
+    """Get global priority request queue.
+
+    Returns None if queue not enabled (uses semaphore fallback).
+    """
+    return _request_queue
+
+
+def _is_queue_enabled() -> bool:
+    """Check if priority queue is enabled."""
+    return _queue_enabled and _request_queue is not None
 
 
 # Phase 2.2: Request Metrics - Monitor Phase 1 backpressure and performance
@@ -300,7 +321,7 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         FastAPI application
     """
     # Phase 2.1: Initialize queue depth from configuration
-    global _max_queue_depth, _rate_limiter
+    global _max_queue_depth, _rate_limiter, _request_queue, _queue_enabled
     _max_queue_depth = config.max_concurrent_requests
     logger.info(f"Request queue depth set to {_max_queue_depth} (from config)")
 
@@ -314,6 +335,25 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         logger.info(f"Rate limiting enabled: {config.rate_limit_rpm} RPM, burst={config.rate_limit_burst}")
     else:
         logger.info("Rate limiting disabled (enable with MLX_RATE_LIMIT_ENABLED=1)")
+
+    # Initialize priority request queue
+    _queue_enabled = config.queue_enabled
+    if _queue_enabled:
+        _request_queue = PriorityRequestQueue(QueueConfig(
+            max_slots=config.max_concurrent_requests,
+            max_queue_depth=config.queue_max_depth,
+            reject_threshold=config.queue_reject_threshold,
+            timeout_high=float(config.queue_timeout_high),
+            timeout_normal=float(config.queue_timeout_normal),
+            timeout_low=float(config.queue_timeout_low),
+            enabled=True
+        ))
+        logger.info(
+            f"Priority queue enabled: max_depth={config.queue_max_depth}, "
+            f"timeouts=({config.queue_timeout_high}/{config.queue_timeout_normal}/{config.queue_timeout_low}s)"
+        )
+    else:
+        logger.info("Priority queue disabled (using semaphore backpressure)")
 
     app = FastAPI(
         title="MLX Server V3",
@@ -451,12 +491,13 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
 
     # V1 Completions endpoint
     @app.post("/v1/completions")
-    async def completions(request: CompletionRequest):
+    async def completions(request: CompletionRequest, http_request: Request):
         """
         OpenAI-compatible completions endpoint.
 
         Args:
             request: Completion request
+            http_request: FastAPI Request for headers
 
         Returns:
             Completion response
@@ -467,114 +508,159 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         if rate_response:
             return rate_response
 
-        # P0: Backpressure control using shared guard
+        # 6.2: Generate unique request ID for tracing/correlation
+        request_id = _generate_request_id()
+        logger.debug(f"[{request_id}] Processing completion request")
+
+        # Use priority queue or semaphore fallback
+        if _is_queue_enabled():
+            return await _completions_with_queue(request, http_request, request_id, worker_manager, format_openai_error)
+        else:
+            return await _completions_with_semaphore(request, request_id, worker_manager, format_openai_error)
+
+    async def _completions_with_queue(request, http_request, request_id, worker_manager, format_openai_error):
+        """Process completion with priority queue."""
+        priority = parse_priority(http_request)
+        queue_guard = QueueGuard(_get_request_queue(), get_metrics())
+
+        # Enqueue request
+        error_response, queue_position = await queue_guard.enqueue(request_id, priority)
+        if error_response:
+            return error_response
+
+        # Wait for slot
+        try:
+            timeout_response = await queue_guard.wait_for_slot()
+            if timeout_response:
+                return timeout_response
+
+            # Record queue wait time
+            wait_ms = queue_guard.wait_time_ms
+            if wait_ms > 0:
+                metrics_collector.record_queue_wait(wait_ms / 1000, priority.name.lower())
+
+            # Process request
+            response = await _process_completion(request, request_id, worker_manager, format_openai_error)
+
+            # Add queue headers to response if it's a JSONResponse
+            if hasattr(response, 'headers'):
+                response.headers["X-Queue-Wait-Ms"] = str(int(wait_ms))
+                if queue_position and queue_position > 0:
+                    response.headers["X-Queue-Position"] = str(queue_position)
+
+            return response
+        finally:
+            await queue_guard.release()
+
+    async def _completions_with_semaphore(request, request_id, worker_manager, format_openai_error):
+        """Process completion with semaphore backpressure (fallback)."""
         guard = BackpressureGuard(_get_request_semaphore(), get_metrics())
         capacity_response = guard.check_capacity()
         if capacity_response:
             return capacity_response
 
-        # Acquire semaphore slot (auto-releases on function exit or exception)
         async with guard.semaphore:
-            # 6.2: Generate unique request ID for tracing/correlation
-            request_id = _generate_request_id()
-            logger.debug(f"[{request_id}] Processing completion request")
+            return await _process_completion(request, request_id, worker_manager, format_openai_error)
 
-            # P0: Track request timing using shared timer
-            timer = RequestTimer(get_metrics())
-            timer.start()
+    async def _process_completion(request, request_id, worker_manager, format_openai_error):
+        """Core completion processing logic."""
+        # P0: Track request timing using shared timer
+        timer = RequestTimer(get_metrics())
+        timer.start()
 
-            try:
-                # P0: Ensure model loaded using shared helper
-                ensure_model_loaded(worker_manager, request.model)
+        try:
+            # P0: Ensure model loaded using shared helper
+            ensure_model_loaded(worker_manager, request.model)
 
-                # Create IPC request
-                ipc_request = IPCCompletionRequest(
-                    model=request.model,
-                    prompt=request.prompt,
-                    max_tokens=request.max_tokens,
-                    temperature=request.temperature,
-                    top_p=request.top_p,
-                    repetition_penalty=request.repetition_penalty,
-                    stream=request.stream
+            # Create IPC request
+            ipc_request = IPCCompletionRequest(
+                model=request.model,
+                prompt=request.prompt,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                repetition_penalty=request.repetition_penalty,
+                stream=request.stream
+            )
+
+            # Generate
+            if request.stream:
+                # P0: Streaming using shared formatter
+                # 6.2: Capture request_id in closure for streaming
+                stream_request_id = request_id
+
+                async def generate_stream():
+                    """Generate SSE stream for text completions."""
+                    try:
+                        for chunk in worker_manager.generate_stream(ipc_request):
+                            if chunk.type == "stream_chunk":
+                                # P0: Use CompletionFormatter for SSE formatting
+                                # 6.2: Pass request_id for tracing
+                                yield CompletionFormatter.format_stream_chunk(
+                                    request.model, chunk, request_id=stream_request_id
+                                )
+                                if chunk.done:
+                                    yield "data: [DONE]\n\n"
+                                    break
+                            elif chunk.type == "error":
+                                yield f"data: {json.dumps(format_openai_error(chunk.message))}\n\n"
+                                break
+                    except Exception as e:
+                        logger.error(f"[{stream_request_id}] Streaming error: {e}", exc_info=True)
+                        yield f"data: {json.dumps(format_openai_error('Internal server error'))}\n\n"
+
+                return StreamingResponse(generate_stream(), media_type="text/event-stream")
+            else:
+                # Non-streaming
+                result = worker_manager.generate(ipc_request)
+
+                # Count prompt tokens using tokenizer
+                try:
+                    tokenizer = get_tokenizer(request.model)
+                    prompt_tokens = len(tokenizer.encode(request.prompt))
+                except Exception as e:
+                    logger.warning(f"[{request_id}] Could not count prompt tokens: {e}")
+                    prompt_tokens = 0
+
+                # P0: Track success and format using shared helpers
+                # 6.2: Pass request_id for tracing
+                timer.record_success()
+                logger.debug(f"[{request_id}] Completion successful: {result['tokens']} tokens")
+                return CompletionFormatter.format_non_streaming(
+                    request.model, result, prompt_tokens, request_id=request_id
                 )
 
-                # Generate
-                if request.stream:
-                    # P0: Streaming using shared formatter
-                    # 6.2: Capture request_id in closure for streaming
-                    stream_request_id = request_id
-
-                    async def generate_stream():
-                        """Generate SSE stream for text completions."""
-                        try:
-                            for chunk in worker_manager.generate_stream(ipc_request):
-                                if chunk.type == "stream_chunk":
-                                    # P0: Use CompletionFormatter for SSE formatting
-                                    # 6.2: Pass request_id for tracing
-                                    yield CompletionFormatter.format_stream_chunk(
-                                        request.model, chunk, request_id=stream_request_id
-                                    )
-                                    if chunk.done:
-                                        yield "data: [DONE]\n\n"
-                                        break
-                                elif chunk.type == "error":
-                                    yield f"data: {json.dumps(format_openai_error(chunk.message))}\n\n"
-                                    break
-                        except Exception as e:
-                            logger.error(f"[{stream_request_id}] Streaming error: {e}", exc_info=True)
-                            yield f"data: {json.dumps(format_openai_error('Internal server error'))}\n\n"
-
-                    return StreamingResponse(generate_stream(), media_type="text/event-stream")
-                else:
-                    # Non-streaming
-                    result = worker_manager.generate(ipc_request)
-
-                    # Count prompt tokens using tokenizer
-                    try:
-                        tokenizer = get_tokenizer(request.model)
-                        prompt_tokens = len(tokenizer.encode(request.prompt))
-                    except Exception as e:
-                        logger.warning(f"[{request_id}] Could not count prompt tokens: {e}")
-                        prompt_tokens = 0
-
-                    # P0: Track success and format using shared helpers
-                    # 6.2: Pass request_id for tracing
-                    timer.record_success()
-                    logger.debug(f"[{request_id}] Completion successful: {result['tokens']} tokens")
-                    return CompletionFormatter.format_non_streaming(
-                        request.model, result, prompt_tokens, request_id=request_id
-                    )
-
-            except HTTPException:
-                timer.record_failure()
-                raise
-            except ValueError as e:
-                timer.record_failure()
-                raise HTTPException(status_code=400, detail=str(e))
-            except NoModelLoadedError as e:
-                timer.record_failure()
-                raise HTTPException(status_code=503, detail=str(e))
-            except WorkerCommunicationError as e:
-                timer.record_failure()
-                logger.warning(f"Backpressure triggered: {e}")
-                raise HTTPException(status_code=503, detail=str(e))
-            except WorkerError as e:
-                timer.record_failure()
-                logger.error(f"Worker error: {e}")
-                raise HTTPException(status_code=500, detail=str(e))
-            except Exception as e:
-                timer.record_failure()
-                logger.error(f"Unexpected error: {e}", exc_info=True)
-                raise HTTPException(status_code=500, detail="Internal server error")
+        except HTTPException:
+            timer.record_failure()
+            raise
+        except ValueError as e:
+            timer.record_failure()
+            raise HTTPException(status_code=400, detail=str(e))
+        except NoModelLoadedError as e:
+            timer.record_failure()
+            raise HTTPException(status_code=503, detail=str(e))
+        except WorkerCommunicationError as e:
+            timer.record_failure()
+            logger.warning(f"Backpressure triggered: {e}")
+            raise HTTPException(status_code=503, detail=str(e))
+        except WorkerError as e:
+            timer.record_failure()
+            logger.error(f"Worker error: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+        except Exception as e:
+            timer.record_failure()
+            logger.error(f"Unexpected error: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     # V1 Chat completions endpoint
     @app.post("/v1/chat/completions")
-    async def chat_completions(request: ChatCompletionRequest):
+    async def chat_completions(request: ChatCompletionRequest, http_request: Request):
         """
         OpenAI-compatible chat completions endpoint.
 
         Args:
             request: Chat completion request
+            http_request: FastAPI Request for headers
 
         Returns:
             Chat completion response
@@ -585,200 +671,242 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         if rate_response:
             return rate_response
 
-        # P0: Backpressure control using shared guard
+        # 6.2: Generate unique request ID for tracing/correlation
+        request_id = _generate_request_id()
+
+        # Use priority queue or semaphore fallback
+        if _is_queue_enabled():
+            return await _chat_completions_with_queue(request, http_request, request_id, worker_manager, format_openai_error)
+        else:
+            return await _chat_completions_with_semaphore(request, request_id, worker_manager, format_openai_error)
+
+    async def _chat_completions_with_queue(request, http_request, request_id, worker_manager, format_openai_error):
+        """Process chat completion with priority queue."""
+        priority = parse_priority(http_request)
+        queue_guard = QueueGuard(_get_request_queue(), get_metrics())
+
+        # Enqueue request
+        error_response, queue_position = await queue_guard.enqueue(request_id, priority)
+        if error_response:
+            return error_response
+
+        # Wait for slot
+        try:
+            timeout_response = await queue_guard.wait_for_slot()
+            if timeout_response:
+                return timeout_response
+
+            # Record queue wait time
+            wait_ms = queue_guard.wait_time_ms
+            if wait_ms > 0:
+                metrics_collector.record_queue_wait(wait_ms / 1000, priority.name.lower())
+
+            # Process request
+            response = await _process_chat_completion(request, request_id, worker_manager, format_openai_error)
+
+            # Add queue headers to response if it's a JSONResponse
+            if hasattr(response, 'headers'):
+                response.headers["X-Queue-Wait-Ms"] = str(int(wait_ms))
+                if queue_position and queue_position > 0:
+                    response.headers["X-Queue-Position"] = str(queue_position)
+
+            return response
+        finally:
+            await queue_guard.release()
+
+    async def _chat_completions_with_semaphore(request, request_id, worker_manager, format_openai_error):
+        """Process chat completion with semaphore backpressure (fallback)."""
         guard = BackpressureGuard(_get_request_semaphore(), get_metrics())
         capacity_response = guard.check_capacity()
         if capacity_response:
             return capacity_response
 
-        # Acquire semaphore slot (auto-releases on function exit or exception)
         async with guard.semaphore:
-            # 6.2: Generate unique request ID for tracing/correlation
-            request_id = _generate_request_id()
+            return await _process_chat_completion(request, request_id, worker_manager, format_openai_error)
 
-            # P0: Track request timing using shared timer
-            timer = RequestTimer(get_metrics())
-            timer.start()
+    async def _process_chat_completion(request, request_id, worker_manager, format_openai_error):
+        """Core chat completion processing logic."""
+        # P0: Track request timing using shared timer
+        timer = RequestTimer(get_metrics())
+        timer.start()
 
-            # Convert chat messages to prompt using model's chat template
-            logger.info(f"[{request_id}] Chat completion request: stream={request.stream}, messages={len(request.messages)}, "
-                       f"max_tokens={request.max_tokens}, temp={request.temperature}, "
-                       f"top_p={request.top_p}, rep_penalty={request.repetition_penalty}")
+        # Convert chat messages to prompt using model's chat template
+        logger.info(f"[{request_id}] Chat completion request: stream={request.stream}, messages={len(request.messages)}, "
+                    f"max_tokens={request.max_tokens}, temp={request.temperature}, "
+                    f"top_p={request.top_p}, rep_penalty={request.repetition_penalty}")
 
-            try:
-                # Get cached tokenizer (Phase 1.1 optimization)
-                tokenizer = get_tokenizer(request.model)
+        try:
+            # Get cached tokenizer (Phase 1.1 optimization)
+            tokenizer = get_tokenizer(request.model)
 
-                # Convert messages to dicts for apply_chat_template
-                # Handle multimodal content (list of blocks) by extracting text only
-                messages_dict = []
-                for msg in request.messages:
-                    if isinstance(msg.content, list):
-                        # Multimodal: extract text blocks only (skip images for prompt)
-                        text_parts = [
-                            block.text for block in msg.content
-                            if hasattr(block, 'type') and block.type == 'text'
-                        ]
-                        content_str = " ".join(text_parts)
-                    else:
-                        # Text-only (backward compatible)
-                        content_str = msg.content
-                    messages_dict.append({"role": msg.role, "content": content_str})
-
-                # Apply chat template (tokenize=False returns string, not tokens)
-                prompt = tokenizer.apply_chat_template(
-                    messages_dict,
-                    tokenize=False,
-                    add_generation_prompt=True
-                )
-                logger.info(f"Chat template applied, prompt length: {len(prompt)} chars, stream={request.stream}")
-                logger.debug(f"Generated prompt: {prompt[:200]}...")
-            except Exception as e:
-                logger.warning(f"Failed to apply chat template for {request.model}: {e}")
-                logger.warning("Falling back to simple concatenation")
-                # Fallback to simple concatenation if template fails
-                # Handle multimodal content (list of content blocks)
-                prompt_parts = []
-                for msg in request.messages:
-                    if isinstance(msg.content, list):
-                        # Multimodal: extract text blocks only (skip images)
-                        text_parts = [
-                            block.text for block in msg.content
-                            if hasattr(block, 'type') and block.type == 'text'
-                        ]
-                        content_str = " ".join(text_parts)
-                    else:
-                        # Text-only
-                        content_str = msg.content
-                    prompt_parts.append(f"{msg.role}: {content_str}")
-                prompt = "\n".join(prompt_parts)
-
-            try:
-                # P0: Ensure model loaded using shared helper
-                ensure_model_loaded(worker_manager, request.model)
-
-                # Phase 2: Image preprocessing for vision/multimodal requests
-                images = None
-                has_images = any(
-                    isinstance(msg.content, list) and
-                    any(hasattr(block, 'type') and block.type == 'image_url' for block in msg.content)
-                    for msg in request.messages
-                )
-
-                if has_images:
-                    logger.info("Vision/multimodal request detected - preprocessing images")
-                    try:
-                        # Collect all content blocks from all messages
-                        all_content_blocks = []
-                        for msg in request.messages:
-                            if isinstance(msg.content, list):
-                                all_content_blocks.extend(msg.content)
-
-                        # Get bridge for large images (if using shared memory)
-                        bridge = worker_manager.bridge if hasattr(worker_manager, 'bridge') else None
-
-                        # Preprocess images
-                        images = await prepare_images(all_content_blocks, bridge=bridge)
-                        logger.info(f"Preprocessed {len(images)} images for request")
-                    except ImportError as e:
-                        # Pillow/mlx-vlm not installed
-                        logger.warning(f"Missing dependency for vision: {e}")
-                        raise HTTPException(status_code=400, detail=str(e))
-                    except ImageProcessingError as e:
-                        logger.warning(f"Image preprocessing failed: {e}")
-                        raise HTTPException(status_code=400, detail=f"Image processing error: {e}")
-
-                # Create IPC request
-                ipc_request = IPCCompletionRequest(
-                    model=request.model,
-                    prompt=prompt,
-                    max_tokens=request.max_tokens,
-                    temperature=request.temperature,
-                    top_p=request.top_p,
-                    repetition_penalty=request.repetition_penalty,
-                    stream=request.stream,
-                    images=images  # Pass preprocessed images (None for text-only)
-                )
-
-                # Generate
-                if request.stream:
-                    # P0: Streaming using shared formatter
-                    # 6.2: Capture request_id in closure for streaming
-                    stream_request_id = request_id
-
-                    async def generate_stream():
-                        """Generate SSE stream for chat completions."""
-                        try:
-                            for chunk in worker_manager.generate_stream(ipc_request):
-                                if chunk.type == "stream_chunk":
-                                    # P0: Use ChatCompletionFormatter for SSE formatting
-                                    # 6.2: Pass request_id for tracing
-                                    yield ChatCompletionFormatter.format_stream_chunk(
-                                        request.model, chunk, request_id=stream_request_id
-                                    )
-                                    if chunk.done:
-                                        yield "data: [DONE]\n\n"
-                                        break
-                                elif chunk.type == "error":
-                                    yield f"data: {json.dumps(format_openai_error(chunk.message))}\n\n"
-                                    break
-                        except Exception as e:
-                            logger.error(f"[{stream_request_id}] Streaming error: {e}", exc_info=True)
-                            yield f"data: {json.dumps(format_openai_error('Internal server error'))}\n\n"
-
-                    return StreamingResponse(generate_stream(), media_type="text/event-stream")
+            # Convert messages to dicts for apply_chat_template
+            # Handle multimodal content (list of blocks) by extracting text only
+            messages_dict = []
+            for msg in request.messages:
+                if isinstance(msg.content, list):
+                    # Multimodal: extract text blocks only (skip images for prompt)
+                    text_parts = [
+                        block.text for block in msg.content
+                        if hasattr(block, 'type') and block.type == 'text'
+                    ]
+                    content_str = " ".join(text_parts)
                 else:
-                    # Non-streaming
-                    start_time = time.time()
-                    result = worker_manager.generate(ipc_request)
-                    generation_time = time.time() - start_time
+                    # Text-only (backward compatible)
+                    content_str = msg.content
+                messages_dict.append({"role": msg.role, "content": content_str})
 
-                    # Count prompt tokens using tokenizer (reload if template failed)
+            # Apply chat template (tokenize=False returns string, not tokens)
+            prompt = tokenizer.apply_chat_template(
+                messages_dict,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            logger.info(f"Chat template applied, prompt length: {len(prompt)} chars, stream={request.stream}")
+            logger.debug(f"Generated prompt: {prompt[:200]}...")
+        except Exception as e:
+            logger.warning(f"Failed to apply chat template for {request.model}: {e}")
+            logger.warning("Falling back to simple concatenation")
+            # Fallback to simple concatenation if template fails
+            # Handle multimodal content (list of content blocks)
+            prompt_parts = []
+            for msg in request.messages:
+                if isinstance(msg.content, list):
+                    # Multimodal: extract text blocks only (skip images)
+                    text_parts = [
+                        block.text for block in msg.content
+                        if hasattr(block, 'type') and block.type == 'text'
+                    ]
+                    content_str = " ".join(text_parts)
+                else:
+                    # Text-only
+                    content_str = msg.content
+                prompt_parts.append(f"{msg.role}: {content_str}")
+            prompt = "\n".join(prompt_parts)
+            tokenizer = None  # Mark that we need to reload
+
+        try:
+            # P0: Ensure model loaded using shared helper
+            ensure_model_loaded(worker_manager, request.model)
+
+            # Phase 2: Image preprocessing for vision/multimodal requests
+            images = None
+            has_images = any(
+                isinstance(msg.content, list) and
+                any(hasattr(block, 'type') and block.type == 'image_url' for block in msg.content)
+                for msg in request.messages
+            )
+
+            if has_images:
+                logger.info("Vision/multimodal request detected - preprocessing images")
+                try:
+                    # Collect all content blocks from all messages
+                    all_content_blocks = []
+                    for msg in request.messages:
+                        if isinstance(msg.content, list):
+                            all_content_blocks.extend(msg.content)
+
+                    # Get bridge for large images (if using shared memory)
+                    bridge = worker_manager.bridge if hasattr(worker_manager, 'bridge') else None
+
+                    # Preprocess images
+                    images = await prepare_images(all_content_blocks, bridge=bridge)
+                    logger.info(f"Preprocessed {len(images)} images for request")
+                except ImportError as e:
+                    # Pillow/mlx-vlm not installed
+                    logger.warning(f"Missing dependency for vision: {e}")
+                    raise HTTPException(status_code=400, detail=str(e))
+                except ImageProcessingError as e:
+                    logger.warning(f"Image preprocessing failed: {e}")
+                    raise HTTPException(status_code=400, detail=f"Image processing error: {e}")
+
+            # Create IPC request
+            ipc_request = IPCCompletionRequest(
+                model=request.model,
+                prompt=prompt,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                repetition_penalty=request.repetition_penalty,
+                stream=request.stream,
+                images=images  # Pass preprocessed images (None for text-only)
+            )
+
+            # Generate
+            if request.stream:
+                # P0: Streaming using shared formatter
+                # 6.2: Capture request_id in closure for streaming
+                stream_request_id = request_id
+
+                async def generate_stream():
+                    """Generate SSE stream for chat completions."""
                     try:
-                        prompt_tokens = len(tokenizer.encode(prompt))
-                    except NameError:
-                        # Tokenizer not defined (template failed), try to reload it
-                        try:
-                            tokenizer = get_tokenizer(request.model)
-                            prompt_tokens = len(tokenizer.encode(prompt))
-                        except Exception as e:
-                            logger.warning(f"[{request_id}] Could not count prompt tokens: {e}")
-                            prompt_tokens = 0
+                        for chunk in worker_manager.generate_stream(ipc_request):
+                            if chunk.type == "stream_chunk":
+                                # P0: Use ChatCompletionFormatter for SSE formatting
+                                # 6.2: Pass request_id for tracing
+                                yield ChatCompletionFormatter.format_stream_chunk(
+                                    request.model, chunk, request_id=stream_request_id
+                                )
+                                if chunk.done:
+                                    yield "data: [DONE]\n\n"
+                                    break
+                            elif chunk.type == "error":
+                                yield f"data: {json.dumps(format_openai_error(chunk.message))}\n\n"
+                                break
+                    except Exception as e:
+                        logger.error(f"[{stream_request_id}] Streaming error: {e}", exc_info=True)
+                        yield f"data: {json.dumps(format_openai_error('Internal server error'))}\n\n"
 
-                    # Log performance metrics
-                    completion_tokens = result["tokens"]
-                    tokens_per_sec = completion_tokens / generation_time if generation_time > 0 else 0
-                    logger.info(f"[{request_id}] Chat completion: {len(result['text'])} chars, {completion_tokens} tokens in {generation_time:.1f}s ({tokens_per_sec:.1f} tok/s)")
-                    logger.debug(f"[{request_id}] Response content: {result['text'][:200]}...")
+                return StreamingResponse(generate_stream(), media_type="text/event-stream")
+            else:
+                # Non-streaming
+                start_time = time.time()
+                result = worker_manager.generate(ipc_request)
+                generation_time = time.time() - start_time
 
-                    # P0: Track success and format using shared helpers
-                    # 6.2: Pass request_id for tracing
-                    timer.record_success()
-                    return ChatCompletionFormatter.format_non_streaming(
-                        request.model, result, prompt_tokens, generation_time, request_id=request_id
-                    )
+                # Count prompt tokens using tokenizer (reload if template failed)
+                try:
+                    if tokenizer is None:
+                        tokenizer = get_tokenizer(request.model)
+                    prompt_tokens = len(tokenizer.encode(prompt))
+                except Exception as e:
+                    logger.warning(f"[{request_id}] Could not count prompt tokens: {e}")
+                    prompt_tokens = 0
 
-            except HTTPException:
-                timer.record_failure()
-                raise
-            except ValueError as e:
-                timer.record_failure()
-                raise HTTPException(status_code=400, detail=str(e))
-            except NoModelLoadedError as e:
-                timer.record_failure()
-                raise HTTPException(status_code=503, detail=str(e))
-            except WorkerCommunicationError as e:
-                timer.record_failure()
-                logger.warning(f"Backpressure triggered: {e}")
-                raise HTTPException(status_code=503, detail=str(e))
-            except WorkerError as e:
-                timer.record_failure()
-                logger.error(f"Worker error: {e}")
-                raise HTTPException(status_code=500, detail=str(e))
-            except Exception as e:
-                timer.record_failure()
-                logger.error(f"Unexpected error: {e}", exc_info=True)
-                raise HTTPException(status_code=500, detail="Internal server error")
+                # Log performance metrics
+                completion_tokens = result["tokens"]
+                tokens_per_sec = completion_tokens / generation_time if generation_time > 0 else 0
+                logger.info(f"[{request_id}] Chat completion: {len(result['text'])} chars, {completion_tokens} tokens in {generation_time:.1f}s ({tokens_per_sec:.1f} tok/s)")
+                logger.debug(f"[{request_id}] Response content: {result['text'][:200]}...")
+
+                # P0: Track success and format using shared helpers
+                # 6.2: Pass request_id for tracing
+                timer.record_success()
+                return ChatCompletionFormatter.format_non_streaming(
+                    request.model, result, prompt_tokens, generation_time, request_id=request_id
+                )
+
+        except HTTPException:
+            timer.record_failure()
+            raise
+        except ValueError as e:
+            timer.record_failure()
+            raise HTTPException(status_code=400, detail=str(e))
+        except NoModelLoadedError as e:
+            timer.record_failure()
+            raise HTTPException(status_code=503, detail=str(e))
+        except WorkerCommunicationError as e:
+            timer.record_failure()
+            logger.warning(f"Backpressure triggered: {e}")
+            raise HTTPException(status_code=503, detail=str(e))
+        except WorkerError as e:
+            timer.record_failure()
+            logger.error(f"Worker error: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+        except Exception as e:
+            timer.record_failure()
+            logger.error(f"Unexpected error: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     # Models list endpoint
     @app.get("/v1/models")
@@ -913,7 +1041,70 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
         # P1: Add rate limiter status
         stats["rate_limiter"] = _get_rate_limiter().get_status()
 
+        # Add priority queue status if enabled
+        if _is_queue_enabled():
+            queue = _get_request_queue()
+            queue_stats = queue.get_stats()
+            stats["priority_queue"] = {
+                "enabled": True,
+                "active_slots": queue_stats.active_slots,
+                "max_slots": queue_stats.max_slots,
+                "queue_depth": queue_stats.queue_depth,
+                "max_queue_depth": queue_stats.max_queue_depth,
+                "waiting_by_priority": {
+                    "high": queue_stats.waiting_high,
+                    "normal": queue_stats.waiting_normal,
+                    "low": queue_stats.waiting_low
+                },
+                "total_enqueued": queue_stats.total_enqueued,
+                "total_timeouts": queue_stats.total_timeouts,
+                "total_completed": queue_stats.total_completed,
+                "avg_wait_time_ms": round(queue_stats.avg_wait_time_ms, 2)
+            }
+        else:
+            stats["priority_queue"] = {"enabled": False}
+
         return stats
+
+    @app.get("/admin/queue")
+    async def admin_queue():
+        """
+        Get detailed priority queue status.
+
+        Returns:
+            Queue statistics including depth, wait times, and priority breakdown
+        """
+        if not _is_queue_enabled():
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "enabled": False,
+                    "message": "Priority queue is disabled. Using semaphore backpressure."
+                }
+            )
+
+        queue = _get_request_queue()
+        stats = queue.get_stats()
+
+        return {
+            "enabled": True,
+            "active_slots": stats.active_slots,
+            "max_slots": stats.max_slots,
+            "queue_depth": stats.queue_depth,
+            "max_queue_depth": stats.max_queue_depth,
+            "utilization": stats.active_slots / stats.max_slots if stats.max_slots > 0 else 0,
+            "waiting_by_priority": {
+                "high": stats.waiting_high,
+                "normal": stats.waiting_normal,
+                "low": stats.waiting_low
+            },
+            "totals": {
+                "enqueued": stats.total_enqueued,
+                "completed": stats.total_completed,
+                "timeouts": stats.total_timeouts
+            },
+            "avg_wait_time_ms": round(stats.avg_wait_time_ms, 2)
+        }
 
     @app.get("/admin/capabilities")
     async def admin_capabilities():
