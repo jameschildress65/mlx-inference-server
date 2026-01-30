@@ -29,7 +29,11 @@ def mock_config():
         total_ram_gb=32,
         chip_model="Test Chip",
         model_name="Test Model",
-        use_shared_memory=True
+        use_shared_memory=True,
+        rate_limit_enabled=False,  # P1: Rate limiting disabled for tests
+        rate_limit_rpm=60,
+        rate_limit_burst=10,
+        graceful_shutdown_timeout=60  # P2: Graceful shutdown timeout
     )
 
 

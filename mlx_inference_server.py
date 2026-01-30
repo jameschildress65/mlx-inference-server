@@ -14,6 +14,7 @@ import os
 import logging
 import signal
 import threading
+import asyncio
 from pathlib import Path
 
 import uvicorn
@@ -26,13 +27,7 @@ from src.config.server_config import ServerConfig
 from src.orchestrator.worker_manager import WorkerManager
 from src.orchestrator.api import create_app, create_admin_app
 from src.orchestrator.idle_monitor import IdleMonitor
-
-
-# Global references for signal handling
-worker_manager_global = None
-idle_monitor_global = None
-main_server_thread = None
-admin_server_thread = None
+from src.orchestrator.shutdown_manager import ShutdownManager
 
 
 def setup_logging(config: ServerConfig):
@@ -50,28 +45,12 @@ def setup_logging(config: ServerConfig):
     )
 
 
-def signal_handler(signum, frame):
-    """Handle shutdown signals."""
-    logger = logging.getLogger(__name__)
-    logger.info(f"Received signal {signum}, shutting down gracefully...")
-
-    if idle_monitor_global:
-        logger.info("Stopping idle monitor...")
-        idle_monitor_global.stop()
-
-    if worker_manager_global:
-        logger.info("Shutting down worker manager...")
-        worker_manager_global.shutdown()
-
-    logger.info("Shutdown complete")
-    sys.exit(0)
-
-
-def run_server(app, host: str, port: int, server_name: str):
-    """Run a FastAPI server in a thread."""
+def run_server_thread(app, host: str, port: int, server_name: str):
+    """Run a FastAPI server in a background thread (for admin API)."""
     logger = logging.getLogger(__name__)
     logger.info(f"Starting {server_name} on {host}:{port}")
 
+    # Use uvicorn.run() for background thread - signal handling not needed
     uvicorn.run(
         app,
         host=host,
@@ -80,10 +59,34 @@ def run_server(app, host: str, port: int, server_name: str):
     )
 
 
+def run_main_server(app, host: str, port: int):
+    """
+    Run the main FastAPI server without uvicorn signal handler override.
+
+    P2 Fix: uvicorn.run() overrides signal handlers, breaking graceful shutdown.
+    Use programmatic server control to preserve our ShutdownManager handlers.
+    """
+    logger = logging.getLogger(__name__)
+
+    # Create uvicorn config without installing signal handlers
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        log_level="info"
+    )
+    server = uvicorn.Server(config)
+
+    # Disable uvicorn's signal handler installation
+    server.install_signal_handlers = lambda: None
+
+    # Run the server (blocking)
+    logger.info(f"Starting Main API on {host}:{port}")
+    asyncio.run(server.serve())
+
+
 def main():
     """Main entry point."""
-    global worker_manager_global, idle_monitor_global, main_server_thread, admin_server_thread
-
     # Set process name for easy identification in ps/top
     setproctitle.setproctitle("mlx-inference-server")
 
@@ -126,7 +129,6 @@ def main():
 
     # Create worker manager
     worker_manager = WorkerManager(config)
-    worker_manager_global = worker_manager
 
     # Start idle monitor
     idle_monitor = IdleMonitor(
@@ -135,12 +137,15 @@ def main():
         check_interval_seconds=30
     )
     idle_monitor.start()
-    idle_monitor_global = idle_monitor
     logger.info(f"Idle monitor started (timeout: {config.idle_timeout_seconds}s)")
 
-    # Setup signal handlers
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    # P2: Setup graceful shutdown (replaces direct signal handlers)
+    shutdown_manager = ShutdownManager(
+        worker_manager=worker_manager,
+        idle_monitor=idle_monitor,
+        drain_timeout=config.graceful_shutdown_timeout
+    )
+    shutdown_manager.install_handlers()
 
     # Create FastAPI apps
     main_app = create_app(config, worker_manager)
@@ -150,23 +155,21 @@ def main():
 
     # Start admin server in background thread
     admin_thread = threading.Thread(
-        target=run_server,
+        target=run_server_thread,
         args=(admin_app, config.host, config.admin_port, "Admin API"),
         daemon=True
     )
     admin_thread.start()
-    admin_server_thread = admin_thread
 
     # Start main server in foreground (blocking)
     logger.info(f"Main API ready at http://{config.host}:{config.main_port}")
     logger.info(f"Admin API ready at http://{config.host}:{config.admin_port}")
+    logger.info(f"Graceful shutdown timeout: {config.graceful_shutdown_timeout}s")
     logger.info("Server started successfully!")
 
-    try:
-        run_server(main_app, config.host, config.main_port, "Main API")
-    except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received")
-        signal_handler(signal.SIGINT, None)
+    # P2: Use programmatic server to preserve ShutdownManager signal handlers
+    # (uvicorn.run() would override our handlers)
+    run_main_server(main_app, config.host, config.main_port)
 
 
 if __name__ == "__main__":

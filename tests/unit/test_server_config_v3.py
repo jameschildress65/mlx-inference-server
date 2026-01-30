@@ -201,6 +201,7 @@ class TestServerConfigDataclass:
             idle_timeout_seconds=180,
             request_timeout_seconds=300,
             model_load_timeout_seconds=120,
+            max_concurrent_requests=10,
             memory_threshold_gb=28,
             cache_dir="/test/cache",
             log_dir="/test/logs",
@@ -208,7 +209,11 @@ class TestServerConfigDataclass:
             machine_type="test",
             total_ram_gb=32,
             chip_model="Test Chip",
-            model_name="Test Model"
+            model_name="Test Model",
+            rate_limit_enabled=False,
+            rate_limit_rpm=60,
+            rate_limit_burst=10,
+            graceful_shutdown_timeout=60
         )
 
         assert config.main_port == 11440

@@ -11,8 +11,44 @@ from asyncio import Semaphore
 from fastapi.responses import JSONResponse
 
 from .worker_manager import WorkerManager
+from .rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
+
+
+class RateLimitGuard:
+    """Handles rate limiting for incoming requests.
+
+    Provides HTTP 429 response with Retry-After header when rate limit exceeded.
+    Disabled by default for home lab use - enable via MLX_RATE_LIMIT_ENABLED=1.
+
+    Args:
+        rate_limiter: RateLimiter instance for token bucket checks
+    """
+
+    def __init__(self, rate_limiter: RateLimiter):
+        self.rate_limiter = rate_limiter
+
+    def check_rate_limit(self) -> Optional[JSONResponse]:
+        """Check if request is allowed under rate limit.
+
+        Returns:
+            JSONResponse with 429 if rate limited, None if allowed
+        """
+        allowed, retry_after = self.rate_limiter.check()
+        if not allowed:
+            return JSONResponse(
+                status_code=429,
+                headers={"Retry-After": str(int(retry_after) + 1)},
+                content={
+                    "error": {
+                        "message": f"Rate limit exceeded. Please retry after {retry_after:.1f} seconds.",
+                        "type": "rate_limit_exceeded",
+                        "code": "rate_limited"
+                    }
+                }
+            )
+        return None
 
 
 class BackpressureGuard:

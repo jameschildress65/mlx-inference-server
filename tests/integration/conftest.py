@@ -84,7 +84,11 @@ def server_config_v3(test_ports_v3, test_dirs_v3):
         total_ram_gb=32,
         chip_model="Test Chip",
         model_name=TEST_MODEL,
-        use_shared_memory=True  # Phase 2 feature
+        use_shared_memory=True,  # Phase 2 feature
+        rate_limit_enabled=False,  # P1: Rate limiting disabled for tests
+        rate_limit_rpm=60,
+        rate_limit_burst=10,
+        graceful_shutdown_timeout=60  # P2: Graceful shutdown timeout
     )
 
 

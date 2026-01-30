@@ -18,7 +18,8 @@ from ..ipc.shared_memory_bridge import WorkerCommunicationError
 from ..config.server_config import ServerConfig
 from .image_utils import prepare_images, ImageProcessingError
 # P0 bloat remediation: Shared helpers for endpoints
-from .request_handlers import BackpressureGuard, RequestTimer, ensure_model_loaded
+from .request_handlers import BackpressureGuard, RequestTimer, ensure_model_loaded, RateLimitGuard
+from .rate_limiter import RateLimiter, RateLimitConfig
 from .response_formatters import CompletionFormatter, ChatCompletionFormatter
 from .health_checks import check_gpu_health, check_memory_health, check_disk_health, check_worker_health
 
@@ -37,6 +38,9 @@ except ImportError:
 _request_semaphore: Optional[Semaphore] = None
 _max_queue_depth = 10  # Default fallback (Phase 2.1: Overridden by config.max_concurrent_requests)
 
+# P1: Global rate limiter instance (disabled by default for home lab)
+_rate_limiter: Optional[RateLimiter] = None
+
 def _get_request_semaphore() -> Semaphore:
     """Get or create the request semaphore for backpressure control.
 
@@ -47,6 +51,19 @@ def _get_request_semaphore() -> Semaphore:
     if _request_semaphore is None:
         _request_semaphore = Semaphore(_max_queue_depth)
     return _request_semaphore
+
+
+def _get_rate_limiter() -> RateLimiter:
+    """Get global rate limiter instance.
+
+    P1: Returns the rate limiter configured at app startup.
+    Disabled by default (config.rate_limit_enabled=False).
+    """
+    global _rate_limiter
+    if _rate_limiter is None:
+        # Fallback if not initialized (shouldn't happen in normal operation)
+        _rate_limiter = RateLimiter(RateLimitConfig(enabled=False))
+    return _rate_limiter
 
 
 # Phase 2.2: Request Metrics - Monitor Phase 1 backpressure and performance
@@ -271,9 +288,20 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         FastAPI application
     """
     # Phase 2.1: Initialize queue depth from configuration
-    global _max_queue_depth
+    global _max_queue_depth, _rate_limiter
     _max_queue_depth = config.max_concurrent_requests
     logger.info(f"Request queue depth set to {_max_queue_depth} (from config)")
+
+    # P1: Initialize rate limiter from configuration
+    _rate_limiter = RateLimiter(RateLimitConfig(
+        requests_per_minute=config.rate_limit_rpm,
+        burst_size=config.rate_limit_burst,
+        enabled=config.rate_limit_enabled
+    ))
+    if config.rate_limit_enabled:
+        logger.info(f"Rate limiting enabled: {config.rate_limit_rpm} RPM, burst={config.rate_limit_burst}")
+    else:
+        logger.info("Rate limiting disabled (enable with MLX_RATE_LIMIT_ENABLED=1)")
 
     app = FastAPI(
         title="MLX Server V3",
@@ -421,6 +449,12 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         Returns:
             Completion response
         """
+        # P1: Rate limit check (before backpressure - fail fast if rate limited)
+        rate_guard = RateLimitGuard(_get_rate_limiter())
+        rate_response = rate_guard.check_rate_limit()
+        if rate_response:
+            return rate_response
+
         # P0: Backpressure control using shared guard
         guard = BackpressureGuard(_get_request_semaphore(), get_metrics())
         capacity_response = guard.check_capacity()
@@ -519,6 +553,12 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
         Returns:
             Chat completion response
         """
+        # P1: Rate limit check (before backpressure - fail fast if rate limited)
+        rate_guard = RateLimitGuard(_get_rate_limiter())
+        rate_response = rate_guard.check_rate_limit()
+        if rate_response:
+            return rate_response
+
         # P0: Backpressure control using shared guard
         guard = BackpressureGuard(_get_request_semaphore(), get_metrics())
         capacity_response = guard.check_capacity()
@@ -827,6 +867,9 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
             "available_slots": semaphore._value,
             "utilization": (_max_queue_depth - semaphore._value) / _max_queue_depth
         }
+
+        # P1: Add rate limiter status
+        stats["rate_limiter"] = _get_rate_limiter().get_status()
 
         return stats
 

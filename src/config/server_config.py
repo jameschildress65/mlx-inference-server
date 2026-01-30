@@ -68,6 +68,14 @@ class ServerConfig:
     chip_model: str
     model_name: str
 
+    # P1: Rate limiting (optional - disabled by default for home lab)
+    rate_limit_enabled: bool
+    rate_limit_rpm: int  # Requests per minute
+    rate_limit_burst: int  # Burst size (max concurrent before throttling)
+
+    # P2: Graceful shutdown
+    graceful_shutdown_timeout: int  # Seconds to wait for request drain
+
     @staticmethod
     def _get_ram_gb() -> int:
         """
@@ -272,6 +280,14 @@ class ServerConfig:
             os.getenv("MLX_MAX_CONCURRENT_REQUESTS", str(default_config["max_concurrent_requests"]))
         )
 
+        # P1: Rate limiting (optional - disabled by default for home lab)
+        rate_limit_enabled = os.getenv("MLX_RATE_LIMIT_ENABLED", "0") == "1"
+        rate_limit_rpm = int(os.getenv("MLX_RATE_LIMIT_RPM", "60"))
+        rate_limit_burst = int(os.getenv("MLX_RATE_LIMIT_BURST", "10"))
+
+        # P2: Graceful shutdown timeout (60s default - streaming can be slow)
+        graceful_shutdown_timeout = int(os.getenv("MLX_GRACEFUL_SHUTDOWN_TIMEOUT", "60"))
+
         # Create configuration
         config = cls(
             main_port=11440,  # V3 Main API port (parallel with V2 on 11436)
@@ -288,7 +304,11 @@ class ServerConfig:
             machine_type=machine_type,
             total_ram_gb=ram_gb,
             chip_model=chip_model,
-            model_name=model_name
+            model_name=model_name,
+            rate_limit_enabled=rate_limit_enabled,
+            rate_limit_rpm=rate_limit_rpm,
+            rate_limit_burst=rate_limit_burst,
+            graceful_shutdown_timeout=graceful_shutdown_timeout
         )
 
         # Ensure directories exist
