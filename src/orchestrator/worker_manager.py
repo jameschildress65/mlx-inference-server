@@ -363,6 +363,28 @@ class WorkerManager:
 
         self.logger.debug(f"Model path validation passed: {model_path}")
 
+    def _preload_tokenizer_async(self, model_path: str) -> None:
+        """
+        5.1: Pre-load tokenizer in background thread to avoid first-request delay.
+
+        Tokenizer loading can take 2-5 seconds on cache miss. By pre-loading
+        during model load (which already takes time), we hide this latency.
+
+        Args:
+            model_path: HuggingFace model path
+        """
+        def _preload():
+            try:
+                from .api import get_tokenizer
+                get_tokenizer(model_path)
+                self.logger.info(f"Tokenizer pre-loaded for {model_path}")
+            except Exception as e:
+                # Non-fatal - tokenizer will load on first request
+                self.logger.warning(f"Failed to pre-load tokenizer: {e}")
+
+        thread = threading.Thread(target=_preload, daemon=True)
+        thread.start()
+
     def load_model(self, model_path: str, timeout: Optional[int] = None) -> ModelLoadResult:
         """
         Spawn new worker subprocess for model.
@@ -524,6 +546,10 @@ class WorkerManager:
                 # Update activity timestamp again (also updated at start of load_model)
                 # This sets accurate idle timer start - idle period starts AFTER load completes
                 self._update_activity()
+
+                # 5.1: Pre-warm tokenizer cache in background thread
+                # Avoids 2-5 second delay on first request from tokenizer load
+                self._preload_tokenizer_async(model_path)
 
                 return ModelLoadResult(
                     model_name=self.active_model_name,

@@ -319,6 +319,9 @@ class ServerConfig:
         os.environ["HF_HOME"] = config.cache_dir
         os.environ["TRANSFORMERS_CACHE"] = config.cache_dir
 
+        # 6.4: Validate configuration before returning
+        config.validate_or_raise()
+
         logger.info(f"Configuration applied: {config.machine_type}")
         logger.info(f"Cache directory: {config.cache_dir}")
         logger.info(f"Idle timeout: {config.idle_timeout_seconds}s")
@@ -360,6 +363,93 @@ Paths:
 ===================================================
         """.strip()
 
+    def validate(self) -> list[str]:
+        """
+        6.4: Validate configuration values.
+
+        Checks all configuration values for sanity and consistency.
+        Called automatically by auto_detect() but can also be called
+        manually after constructing a ServerConfig.
+
+        Returns:
+            List of validation error messages (empty if valid)
+        """
+        errors = []
+
+        # Port validation
+        if not (1024 <= self.main_port <= 65535):
+            errors.append(f"main_port must be 1024-65535, got {self.main_port}")
+        if not (1024 <= self.admin_port <= 65535):
+            errors.append(f"admin_port must be 1024-65535, got {self.admin_port}")
+        if self.main_port == self.admin_port:
+            errors.append(f"main_port and admin_port cannot be the same ({self.main_port})")
+
+        # Timeout validation
+        if self.idle_timeout_seconds < 0:
+            errors.append(f"idle_timeout_seconds must be non-negative, got {self.idle_timeout_seconds}")
+        if self.request_timeout_seconds <= 0:
+            errors.append(f"request_timeout_seconds must be positive, got {self.request_timeout_seconds}")
+        if self.model_load_timeout_seconds <= 0:
+            errors.append(f"model_load_timeout_seconds must be positive, got {self.model_load_timeout_seconds}")
+
+        # Memory validation
+        if self.memory_threshold_gb <= 0:
+            errors.append(f"memory_threshold_gb must be positive, got {self.memory_threshold_gb}")
+        if self.memory_threshold_gb > self.total_ram_gb:
+            errors.append(
+                f"memory_threshold_gb ({self.memory_threshold_gb}) cannot exceed "
+                f"total_ram_gb ({self.total_ram_gb})"
+            )
+
+        # Concurrency validation
+        if self.max_concurrent_requests < 1:
+            errors.append(f"max_concurrent_requests must be at least 1, got {self.max_concurrent_requests}")
+        if self.max_concurrent_requests > 100:
+            errors.append(
+                f"max_concurrent_requests ({self.max_concurrent_requests}) is very high, "
+                "consider a value <= 100"
+            )
+
+        # Rate limiting validation (only if enabled)
+        if self.rate_limit_enabled:
+            if self.rate_limit_rpm <= 0:
+                errors.append(f"rate_limit_rpm must be positive when enabled, got {self.rate_limit_rpm}")
+            if self.rate_limit_burst < 1:
+                errors.append(f"rate_limit_burst must be at least 1 when enabled, got {self.rate_limit_burst}")
+            if self.rate_limit_burst > self.rate_limit_rpm:
+                errors.append(
+                    f"rate_limit_burst ({self.rate_limit_burst}) should not exceed "
+                    f"rate_limit_rpm ({self.rate_limit_rpm})"
+                )
+
+        # Graceful shutdown validation
+        if self.graceful_shutdown_timeout < 0:
+            errors.append(f"graceful_shutdown_timeout must be non-negative, got {self.graceful_shutdown_timeout}")
+        if self.graceful_shutdown_timeout > 300:
+            errors.append(
+                f"graceful_shutdown_timeout ({self.graceful_shutdown_timeout}s) is very long, "
+                "consider a value <= 300s"
+            )
+
+        # Directory validation
+        if not self.cache_dir:
+            errors.append("cache_dir cannot be empty")
+        if not self.log_dir:
+            errors.append("log_dir cannot be empty")
+
+        return errors
+
+    def validate_or_raise(self) -> None:
+        """
+        6.4: Validate configuration and raise if invalid.
+
+        Raises:
+            ValueError: If any validation errors are found
+        """
+        errors = self.validate()
+        if errors:
+            raise ValueError(f"Configuration validation failed: {'; '.join(errors)}")
+
     def to_dict(self) -> dict:
         """
         Convert configuration to dictionary.
@@ -382,5 +472,9 @@ Paths:
             "use_shared_memory": self.use_shared_memory,
             "total_ram_gb": self.total_ram_gb,
             "chip_model": self.chip_model,
-            "model_name": self.model_name
+            "model_name": self.model_name,
+            "rate_limit_enabled": self.rate_limit_enabled,
+            "rate_limit_rpm": self.rate_limit_rpm,
+            "rate_limit_burst": self.rate_limit_burst,
+            "graceful_shutdown_timeout": self.graceful_shutdown_timeout
         }
