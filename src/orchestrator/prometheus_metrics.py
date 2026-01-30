@@ -116,6 +116,29 @@ QUEUE_MAX_DEPTH = Gauge(
     registry=REGISTRY
 )
 
+# Priority queue specific metrics
+QUEUE_WAIT_TIME = Histogram(
+    'mlx_queue_wait_seconds',
+    'Time spent waiting in queue',
+    ['priority'],
+    buckets=(0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0),
+    registry=REGISTRY
+)
+
+QUEUE_TIMEOUTS = Counter(
+    'mlx_queue_timeouts_total',
+    'Requests that timed out while waiting in queue',
+    ['priority'],
+    registry=REGISTRY
+)
+
+QUEUE_WAITING_BY_PRIORITY = Gauge(
+    'mlx_queue_waiting',
+    'Requests waiting in queue by priority',
+    ['priority'],
+    registry=REGISTRY
+)
+
 # ============ Rate Limiting Metrics ============
 RATE_LIMIT_REJECTS = Counter(
     'mlx_rate_limit_rejects_total',
@@ -217,6 +240,20 @@ class MetricsCollector:
     def update_rate_limit_tokens(self, tokens: float):
         """Update rate limiter token bucket level."""
         RATE_LIMIT_TOKENS.set(tokens)
+
+    def record_queue_wait(self, wait_seconds: float, priority: str):
+        """Record queue wait time for a request."""
+        QUEUE_WAIT_TIME.labels(priority=priority).observe(wait_seconds)
+
+    def record_queue_timeout(self, priority: str):
+        """Record a queue timeout."""
+        QUEUE_TIMEOUTS.labels(priority=priority).inc()
+
+    def update_queue_waiting_by_priority(self, high: int, normal: int, low: int):
+        """Update queue waiting counts by priority."""
+        QUEUE_WAITING_BY_PRIORITY.labels(priority='high').set(high)
+        QUEUE_WAITING_BY_PRIORITY.labels(priority='normal').set(normal)
+        QUEUE_WAITING_BY_PRIORITY.labels(priority='low').set(low)
 
 
 # Global collector instance

@@ -6,12 +6,17 @@ and model loading across completion endpoints.
 
 import time
 import logging
-from typing import Optional
+from typing import Optional, Tuple
 from asyncio import Semaphore
+from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from .worker_manager import WorkerManager
 from .rate_limiter import RateLimiter
+from .priority_queue import (
+    PriorityRequestQueue, Priority, QueuedRequest,
+    QueueTimeoutError, QueueFullError
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +95,130 @@ class BackpressureGuard:
                 }
             )
         return None
+
+
+def parse_priority(http_request: Request) -> Priority:
+    """Parse priority from X-Priority header.
+
+    Args:
+        http_request: FastAPI Request object
+
+    Returns:
+        Priority enum value (defaults to NORMAL)
+    """
+    header_value = http_request.headers.get("X-Priority", "normal").lower()
+    if header_value == "high":
+        return Priority.HIGH
+    elif header_value == "low":
+        return Priority.LOW
+    else:
+        return Priority.NORMAL
+
+
+class QueueGuard:
+    """Handles priority queue management for incoming requests.
+
+    Replaces BackpressureGuard with proper queuing instead of immediate 503.
+    Provides wait-with-timeout semantics and queue position tracking.
+
+    Args:
+        queue: PriorityRequestQueue instance
+        metrics: RequestMetrics instance for tracking
+    """
+
+    def __init__(self, queue: PriorityRequestQueue, metrics):
+        self.queue = queue
+        self.metrics = metrics
+        self._entry: Optional[QueuedRequest] = None
+        self._request_id: Optional[str] = None
+        self._priority: Priority = Priority.NORMAL
+
+    async def enqueue(
+        self,
+        request_id: str,
+        priority: Priority = Priority.NORMAL
+    ) -> Tuple[Optional[JSONResponse], Optional[int]]:
+        """Enqueue request and return error response if queue full.
+
+        Args:
+            request_id: Unique request identifier
+            priority: Request priority level
+
+        Returns:
+            Tuple of (error_response, queue_position)
+            - error_response: JSONResponse if rejected, None if queued
+            - queue_position: Position in queue (0 = immediate, None if rejected)
+        """
+        self._request_id = request_id
+        self._priority = priority
+
+        try:
+            self._entry = await self.queue.enqueue(request_id, priority)
+
+            # Get position (0 = got slot immediately, 1+ = waiting)
+            position = await self.queue.get_position(request_id)
+            return None, position
+
+        except QueueFullError as e:
+            logger.warning(f"[{request_id}] Queue full: {e.queue_depth} >= {e.threshold}")
+            self.metrics.record_queue_reject()
+            return JSONResponse(
+                status_code=503,
+                headers={"Retry-After": "30"},
+                content={
+                    "error": {
+                        "message": "Server queue is full. Please retry after a brief delay.",
+                        "type": "server_overloaded",
+                        "code": "queue_full"
+                    }
+                }
+            ), None
+
+    async def wait_for_slot(self) -> Optional[JSONResponse]:
+        """Wait for processing slot to become available.
+
+        Returns:
+            JSONResponse with 503 if timeout, None if slot acquired
+        """
+        if self._entry is None:
+            return None
+
+        try:
+            await self.queue.wait_for_slot(self._entry)
+            return None
+
+        except QueueTimeoutError as e:
+            logger.warning(f"[{self._request_id}] Queue timeout: {e.wait_time_ms:.0f}ms")
+            from .prometheus_metrics import metrics_collector
+            metrics_collector.record_queue_timeout(self._priority.name.lower())
+
+            return JSONResponse(
+                status_code=503,
+                headers={
+                    "Retry-After": "30",
+                    "X-Queue-Position": str(e.position),
+                    "X-Queue-Wait-Ms": str(int(e.wait_time_ms))
+                },
+                content={
+                    "error": {
+                        "message": f"Request timed out waiting in queue after {e.wait_time_ms:.0f}ms",
+                        "type": "queue_timeout",
+                        "code": "queue_timeout"
+                    }
+                }
+            )
+
+    async def release(self) -> None:
+        """Release slot on request completion."""
+        if self._request_id:
+            await self.queue.release_slot(self._request_id)
+
+    @property
+    def wait_time_ms(self) -> float:
+        """Get time spent waiting in queue (milliseconds)."""
+        if self._entry:
+            return self._entry.wait_time_ms
+        return 0.0
 
 
 class RequestTimer:

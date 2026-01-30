@@ -76,6 +76,14 @@ class ServerConfig:
     # P2: Graceful shutdown
     graceful_shutdown_timeout: int  # Seconds to wait for request drain
 
+    # Priority Queue (replaces simple semaphore backpressure)
+    queue_enabled: bool  # Enable priority queue (vs simple semaphore)
+    queue_max_depth: int  # Max pending requests in queue
+    queue_timeout_high: int  # Timeout for HIGH priority (seconds)
+    queue_timeout_normal: int  # Timeout for NORMAL priority (seconds)
+    queue_timeout_low: int  # Timeout for LOW priority (seconds)
+    queue_reject_threshold: int  # Fast-reject when total exceeds this
+
     @staticmethod
     def _get_ram_gb() -> int:
         """
@@ -288,6 +296,14 @@ class ServerConfig:
         # P2: Graceful shutdown timeout (60s default - streaming can be slow)
         graceful_shutdown_timeout = int(os.getenv("MLX_GRACEFUL_SHUTDOWN_TIMEOUT", "60"))
 
+        # Priority Queue configuration (replaces simple semaphore backpressure)
+        queue_enabled = os.getenv("MLX_QUEUE_ENABLED", "1") == "1"  # Enabled by default
+        queue_max_depth = int(os.getenv("MLX_QUEUE_MAX_DEPTH", "50"))
+        queue_timeout_high = int(os.getenv("MLX_QUEUE_TIMEOUT_HIGH", "120"))
+        queue_timeout_normal = int(os.getenv("MLX_QUEUE_TIMEOUT_NORMAL", "60"))
+        queue_timeout_low = int(os.getenv("MLX_QUEUE_TIMEOUT_LOW", "30"))
+        queue_reject_threshold = int(os.getenv("MLX_QUEUE_REJECT_THRESHOLD", "100"))
+
         # Create configuration
         config = cls(
             main_port=11440,  # V3 Main API port (parallel with V2 on 11436)
@@ -308,7 +324,13 @@ class ServerConfig:
             rate_limit_enabled=rate_limit_enabled,
             rate_limit_rpm=rate_limit_rpm,
             rate_limit_burst=rate_limit_burst,
-            graceful_shutdown_timeout=graceful_shutdown_timeout
+            graceful_shutdown_timeout=graceful_shutdown_timeout,
+            queue_enabled=queue_enabled,
+            queue_max_depth=queue_max_depth,
+            queue_timeout_high=queue_timeout_high,
+            queue_timeout_normal=queue_timeout_normal,
+            queue_timeout_low=queue_timeout_low,
+            queue_reject_threshold=queue_reject_threshold
         )
 
         # Ensure directories exist
@@ -431,6 +453,38 @@ Paths:
                 "consider a value <= 300s"
             )
 
+        # Priority queue validation (only if enabled)
+        if self.queue_enabled:
+            if self.queue_max_depth < 1:
+                errors.append(f"queue_max_depth must be at least 1, got {self.queue_max_depth}")
+            if self.queue_max_depth > 1000:
+                errors.append(
+                    f"queue_max_depth ({self.queue_max_depth}) is very high, "
+                    "consider a value <= 1000"
+                )
+            if self.queue_timeout_high <= 0:
+                errors.append(f"queue_timeout_high must be positive, got {self.queue_timeout_high}")
+            if self.queue_timeout_normal <= 0:
+                errors.append(f"queue_timeout_normal must be positive, got {self.queue_timeout_normal}")
+            if self.queue_timeout_low <= 0:
+                errors.append(f"queue_timeout_low must be positive, got {self.queue_timeout_low}")
+            if self.queue_reject_threshold < self.queue_max_depth:
+                errors.append(
+                    f"queue_reject_threshold ({self.queue_reject_threshold}) should be >= "
+                    f"queue_max_depth ({self.queue_max_depth})"
+                )
+            # Timeouts should be ordered: high > normal > low
+            if self.queue_timeout_high < self.queue_timeout_normal:
+                errors.append(
+                    f"queue_timeout_high ({self.queue_timeout_high}) should be >= "
+                    f"queue_timeout_normal ({self.queue_timeout_normal})"
+                )
+            if self.queue_timeout_normal < self.queue_timeout_low:
+                errors.append(
+                    f"queue_timeout_normal ({self.queue_timeout_normal}) should be >= "
+                    f"queue_timeout_low ({self.queue_timeout_low})"
+                )
+
         # Directory validation
         if not self.cache_dir:
             errors.append("cache_dir cannot be empty")
@@ -476,5 +530,11 @@ Paths:
             "rate_limit_enabled": self.rate_limit_enabled,
             "rate_limit_rpm": self.rate_limit_rpm,
             "rate_limit_burst": self.rate_limit_burst,
-            "graceful_shutdown_timeout": self.graceful_shutdown_timeout
+            "graceful_shutdown_timeout": self.graceful_shutdown_timeout,
+            "queue_enabled": self.queue_enabled,
+            "queue_max_depth": self.queue_max_depth,
+            "queue_timeout_high": self.queue_timeout_high,
+            "queue_timeout_normal": self.queue_timeout_normal,
+            "queue_timeout_low": self.queue_timeout_low,
+            "queue_reject_threshold": self.queue_reject_threshold
         }
