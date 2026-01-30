@@ -172,8 +172,33 @@ class TestCommandInjectionPrevention:
         ]
 
         for encoding_path in encoding_paths:
-            with pytest.raises(ValueError, match="Invalid model path format"):
+            with pytest.raises(ValueError, match="Invalid model path format|ASCII-only|confusable"):
                 wm.load_model(encoding_path, timeout=1)
+
+    def test_unicode_normalization_bypass_prevention(self, worker_manager):
+        """
+        Test 4.2 fix: Unicode normalization bypass attacks are prevented.
+
+        Attackers can use confusable Unicode characters that normalize to ASCII,
+        potentially bypassing validation. For example:
+        - Full-width solidus (U+FF0F) normalizes to "/" (U+002F)
+        - Full-width letters normalize to ASCII letters
+        """
+        wm = worker_manager
+
+        # Unicode normalization bypass attempts
+        normalization_attacks = [
+            "mlx-community\uff0fQwen",  # Full-width solidus (／) instead of /
+            "mlx\u2010community/Qwen",  # Hyphen (‐) instead of -
+            "ｍｌｘ-community/Qwen",  # Full-width letters
+            "mlx-community/Ｑｗｅｎ",  # Full-width model name
+            "mlx\u2212community/Qwen",  # Minus sign instead of hyphen
+            "mlx\u00adcommunity/Qwen",  # Soft hyphen (invisible)
+        ]
+
+        for attack_path in normalization_attacks:
+            with pytest.raises(ValueError, match="confusable Unicode|ASCII-only"):
+                wm.load_model(attack_path, timeout=1)
 
     def test_valid_model_paths_accepted(self, worker_manager):
         """Test that valid model paths are accepted."""

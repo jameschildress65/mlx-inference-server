@@ -487,14 +487,24 @@ class SharedMemoryBridge:
                 struct.pack_into('I', data_buf, offset, msg_len)
                 data_buf[offset + 4:offset + frame_size] = data
             else:
-                # Handle wrap-around (rare for small messages)
-                # Build frame: [length_prefix][data]
-                temp = struct.pack('I', msg_len) + data
+                # 3.1 Optimization: Handle wrap-around WITHOUT full temp copy
+                # Avoids O(n) allocation for large messages near MAX_MESSAGE_SIZE (2MB)
                 first_chunk_size = self.RING_SIZE - offset
 
-                # Write in two parts
-                data_buf[offset:self.RING_SIZE] = temp[:first_chunk_size]
-                data_buf[0:frame_size - first_chunk_size] = temp[first_chunk_size:]
+                if first_chunk_size >= 4:
+                    # Length prefix fits before wrap
+                    struct.pack_into('I', data_buf, offset, msg_len)
+                    data_before_wrap = first_chunk_size - 4
+                    if data_before_wrap > 0:
+                        data_buf[offset + 4:self.RING_SIZE] = data[:data_before_wrap]
+                    data_buf[0:msg_len - data_before_wrap] = data[data_before_wrap:]
+                else:
+                    # Length prefix wraps (rare edge case)
+                    length_bytes = struct.pack('I', msg_len)
+                    data_buf[offset:self.RING_SIZE] = length_bytes[:first_chunk_size]
+                    remaining_length = 4 - first_chunk_size
+                    data_buf[0:remaining_length] = length_bytes[first_chunk_size:]
+                    data_buf[remaining_length:remaining_length + msg_len] = data
 
             # Update write position (guaranteed atomic visibility via semaphore)
             struct.pack_into('Q', header, self.WRITE_POS_OFFSET, write_pos + frame_size)

@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import logging
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any, Set
@@ -316,9 +317,11 @@ class WorkerManager:
         Validate model path against injection attacks.
 
         Security checks:
-        1. Format validation (org/model pattern)
-        2. Organization whitelist
-        3. Path traversal prevention
+        1. Unicode normalization bypass prevention (4.2 fix)
+        2. ASCII-only enforcement
+        3. Format validation (org/model pattern)
+        4. Organization whitelist
+        5. Path traversal prevention
 
         Args:
             model_path: HuggingFace model path (e.g., "mlx-community/Qwen2.5-7B-Instruct-4bit")
@@ -326,6 +329,19 @@ class WorkerManager:
         Raises:
             ValueError: If model path fails validation
         """
+        # 4.2 Security Fix: Prevent Unicode normalization bypass attacks
+        # Example: "mlx-community／Qwen" uses full-width solidus (U+FF0F)
+        # which normalizes to "/" and could bypass validation
+        normalized = unicodedata.normalize('NFKC', model_path)
+        if normalized != model_path:
+            raise ValueError(
+                f"Model path contains confusable Unicode characters: {model_path}"
+            )
+
+        # 4.2 Security Fix: Enforce ASCII-only (no Unicode lookalikes)
+        if not model_path.isascii():
+            raise ValueError(f"Model path must be ASCII-only: {model_path}")
+
         # 1. Check format
         if not ALLOWED_MODEL_PATTERN.match(model_path):
             raise ValueError(
