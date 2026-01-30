@@ -2,13 +2,26 @@
 
 Provides formatting utilities for both /v1/completions and /v1/chat/completions
 endpoints, handling streaming (SSE) and non-streaming responses.
+
+6.2: Supports unique request IDs for tracing/correlation.
 """
 
 import json
 import time
-from typing import Dict, Any
+import uuid
+from typing import Dict, Any, Optional
 
 from ..ipc.messages import StreamChunk
+
+
+def generate_completion_id() -> str:
+    """Generate unique completion ID for tracing (6.2)."""
+    return f"cmpl-{uuid.uuid4().hex[:12]}"
+
+
+def generate_chat_completion_id() -> str:
+    """Generate unique chat completion ID for tracing (6.2)."""
+    return f"chatcmpl-{uuid.uuid4().hex[:12]}"
 
 
 class CompletionFormatter:
@@ -18,7 +31,8 @@ class CompletionFormatter:
     def format_non_streaming(
         model: str,
         result: Dict[str, Any],
-        prompt_tokens: int
+        prompt_tokens: int,
+        request_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Format non-streaming completion response.
 
@@ -26,13 +40,14 @@ class CompletionFormatter:
             model: Model name
             result: Worker generation result with 'text', 'tokens', 'finish_reason'
             prompt_tokens: Number of prompt tokens
+            request_id: Optional request ID for tracing (6.2)
 
         Returns:
             OpenAI-compatible text completion response
         """
         completion_tokens = result["tokens"]
         return {
-            "id": "cmpl-mlx-v3",
+            "id": request_id or generate_completion_id(),
             "object": "text_completion",
             "created": int(time.time()),
             "model": model,
@@ -50,18 +65,23 @@ class CompletionFormatter:
         }
 
     @staticmethod
-    def format_stream_chunk(model: str, chunk: StreamChunk) -> str:
+    def format_stream_chunk(
+        model: str,
+        chunk: StreamChunk,
+        request_id: Optional[str] = None
+    ) -> str:
         """Format streaming chunk for text completions (SSE).
 
         Args:
             model: Model name
             chunk: Stream chunk from worker
+            request_id: Optional request ID for tracing (6.2)
 
         Returns:
             SSE-formatted data line
         """
         data = {
-            "id": "cmpl-mlx-v3",
+            "id": request_id or generate_completion_id(),
             "object": "text_completion",
             "created": int(time.time()),
             "model": model,
@@ -82,7 +102,8 @@ class ChatCompletionFormatter:
         model: str,
         result: Dict[str, Any],
         prompt_tokens: int,
-        generation_time: float = 0.0
+        generation_time: float = 0.0,
+        request_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Format non-streaming chat completion response.
 
@@ -91,6 +112,7 @@ class ChatCompletionFormatter:
             result: Worker generation result with 'text', 'tokens', 'finish_reason'
             prompt_tokens: Number of prompt tokens
             generation_time: Time taken for generation (seconds), for tokens/sec calculation
+            request_id: Optional request ID for tracing (6.2)
 
         Returns:
             OpenAI-compatible chat completion response
@@ -99,7 +121,7 @@ class ChatCompletionFormatter:
         tokens_per_sec = completion_tokens / generation_time if generation_time > 0 else 0.0
 
         return {
-            "id": "chatcmpl-mlx-v3",
+            "id": request_id or generate_chat_completion_id(),
             "object": "chat.completion",
             "created": int(time.time()),
             "model": model,
@@ -120,7 +142,11 @@ class ChatCompletionFormatter:
         }
 
     @staticmethod
-    def format_stream_chunk(model: str, chunk: StreamChunk) -> str:
+    def format_stream_chunk(
+        model: str,
+        chunk: StreamChunk,
+        request_id: Optional[str] = None
+    ) -> str:
         """Format streaming chunk for chat completions (SSE).
 
         Uses delta.content format for chat completion streaming
@@ -129,12 +155,13 @@ class ChatCompletionFormatter:
         Args:
             model: Model name
             chunk: Stream chunk from worker
+            request_id: Optional request ID for tracing (6.2)
 
         Returns:
             SSE-formatted data line
         """
         data = {
-            "id": "chatcmpl-mlx-v3",
+            "id": request_id or generate_chat_completion_id(),
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": model,

@@ -4,10 +4,11 @@ import asyncio
 import logging
 import json
 import time
+import uuid
 from asyncio import Semaphore
 from functools import lru_cache
 from typing import Dict, Any, Optional, Union, Literal
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -22,6 +23,7 @@ from .request_handlers import BackpressureGuard, RequestTimer, ensure_model_load
 from .rate_limiter import RateLimiter, RateLimitConfig
 from .response_formatters import CompletionFormatter, ChatCompletionFormatter
 from .health_checks import check_gpu_health, check_memory_health, check_disk_health, check_worker_health
+from .prometheus_metrics import metrics_router, metrics_collector
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,16 @@ _max_queue_depth = 10  # Default fallback (Phase 2.1: Overridden by config.max_c
 
 # P1: Global rate limiter instance (disabled by default for home lab)
 _rate_limiter: Optional[RateLimiter] = None
+
+
+def _generate_request_id() -> str:
+    """
+    6.2: Generate unique request ID for tracing/correlation.
+
+    Format: req-<uuid4> (e.g., req-550e8400-e29b-41d4-a716-446655440000)
+    Used in responses and logs for debugging/tracing.
+    """
+    return f"req-{uuid.uuid4()}"
 
 def _get_request_semaphore() -> Semaphore:
     """Get or create the request semaphore for backpressure control.
@@ -463,6 +475,10 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
 
         # Acquire semaphore slot (auto-releases on function exit or exception)
         async with guard.semaphore:
+            # 6.2: Generate unique request ID for tracing/correlation
+            request_id = _generate_request_id()
+            logger.debug(f"[{request_id}] Processing completion request")
+
             # P0: Track request timing using shared timer
             timer = RequestTimer(get_metrics())
             timer.start()
@@ -485,13 +501,19 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                 # Generate
                 if request.stream:
                     # P0: Streaming using shared formatter
+                    # 6.2: Capture request_id in closure for streaming
+                    stream_request_id = request_id
+
                     async def generate_stream():
                         """Generate SSE stream for text completions."""
                         try:
                             for chunk in worker_manager.generate_stream(ipc_request):
                                 if chunk.type == "stream_chunk":
                                     # P0: Use CompletionFormatter for SSE formatting
-                                    yield CompletionFormatter.format_stream_chunk(request.model, chunk)
+                                    # 6.2: Pass request_id for tracing
+                                    yield CompletionFormatter.format_stream_chunk(
+                                        request.model, chunk, request_id=stream_request_id
+                                    )
                                     if chunk.done:
                                         yield "data: [DONE]\n\n"
                                         break
@@ -499,7 +521,7 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                                     yield f"data: {json.dumps(format_openai_error(chunk.message))}\n\n"
                                     break
                         except Exception as e:
-                            logger.error(f"Streaming error: {e}", exc_info=True)
+                            logger.error(f"[{stream_request_id}] Streaming error: {e}", exc_info=True)
                             yield f"data: {json.dumps(format_openai_error('Internal server error'))}\n\n"
 
                     return StreamingResponse(generate_stream(), media_type="text/event-stream")
@@ -512,12 +534,16 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                         tokenizer = get_tokenizer(request.model)
                         prompt_tokens = len(tokenizer.encode(request.prompt))
                     except Exception as e:
-                        logger.warning(f"Could not count prompt tokens: {e}")
+                        logger.warning(f"[{request_id}] Could not count prompt tokens: {e}")
                         prompt_tokens = 0
 
                     # P0: Track success and format using shared helpers
+                    # 6.2: Pass request_id for tracing
                     timer.record_success()
-                    return CompletionFormatter.format_non_streaming(request.model, result, prompt_tokens)
+                    logger.debug(f"[{request_id}] Completion successful: {result['tokens']} tokens")
+                    return CompletionFormatter.format_non_streaming(
+                        request.model, result, prompt_tokens, request_id=request_id
+                    )
 
             except HTTPException:
                 timer.record_failure()
@@ -567,12 +593,15 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
 
         # Acquire semaphore slot (auto-releases on function exit or exception)
         async with guard.semaphore:
+            # 6.2: Generate unique request ID for tracing/correlation
+            request_id = _generate_request_id()
+
             # P0: Track request timing using shared timer
             timer = RequestTimer(get_metrics())
             timer.start()
 
             # Convert chat messages to prompt using model's chat template
-            logger.info(f"Chat completion request: stream={request.stream}, messages={len(request.messages)}, "
+            logger.info(f"[{request_id}] Chat completion request: stream={request.stream}, messages={len(request.messages)}, "
                        f"max_tokens={request.max_tokens}, temp={request.temperature}, "
                        f"top_p={request.top_p}, rep_penalty={request.repetition_penalty}")
 
@@ -674,13 +703,19 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                 # Generate
                 if request.stream:
                     # P0: Streaming using shared formatter
+                    # 6.2: Capture request_id in closure for streaming
+                    stream_request_id = request_id
+
                     async def generate_stream():
                         """Generate SSE stream for chat completions."""
                         try:
                             for chunk in worker_manager.generate_stream(ipc_request):
                                 if chunk.type == "stream_chunk":
                                     # P0: Use ChatCompletionFormatter for SSE formatting
-                                    yield ChatCompletionFormatter.format_stream_chunk(request.model, chunk)
+                                    # 6.2: Pass request_id for tracing
+                                    yield ChatCompletionFormatter.format_stream_chunk(
+                                        request.model, chunk, request_id=stream_request_id
+                                    )
                                     if chunk.done:
                                         yield "data: [DONE]\n\n"
                                         break
@@ -688,7 +723,7 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                                     yield f"data: {json.dumps(format_openai_error(chunk.message))}\n\n"
                                     break
                         except Exception as e:
-                            logger.error(f"Streaming error: {e}", exc_info=True)
+                            logger.error(f"[{stream_request_id}] Streaming error: {e}", exc_info=True)
                             yield f"data: {json.dumps(format_openai_error('Internal server error'))}\n\n"
 
                     return StreamingResponse(generate_stream(), media_type="text/event-stream")
@@ -707,19 +742,20 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                             tokenizer = get_tokenizer(request.model)
                             prompt_tokens = len(tokenizer.encode(prompt))
                         except Exception as e:
-                            logger.warning(f"Could not count prompt tokens: {e}")
+                            logger.warning(f"[{request_id}] Could not count prompt tokens: {e}")
                             prompt_tokens = 0
 
                     # Log performance metrics
                     completion_tokens = result["tokens"]
                     tokens_per_sec = completion_tokens / generation_time if generation_time > 0 else 0
-                    logger.info(f"Chat completion: {len(result['text'])} chars, {completion_tokens} tokens in {generation_time:.1f}s ({tokens_per_sec:.1f} tok/s)")
-                    logger.debug(f"Response content: {result['text'][:200]}...")
+                    logger.info(f"[{request_id}] Chat completion: {len(result['text'])} chars, {completion_tokens} tokens in {generation_time:.1f}s ({tokens_per_sec:.1f} tok/s)")
+                    logger.debug(f"[{request_id}] Response content: {result['text'][:200]}...")
 
                     # P0: Track success and format using shared helpers
+                    # 6.2: Pass request_id for tracing
                     timer.record_success()
                     return ChatCompletionFormatter.format_non_streaming(
-                        request.model, result, prompt_tokens, generation_time
+                        request.model, result, prompt_tokens, generation_time, request_id=request_id
                     )
 
             except HTTPException:
@@ -801,6 +837,12 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
         description="Administrative endpoints for model management",
         version="3.1.0"
     )
+
+    # 6.3: Include Prometheus metrics router
+    app.include_router(metrics_router)
+
+    # Initialize server info metric
+    metrics_collector.set_server_info(version="3.1.0")
 
     @app.get("/admin/health")
     async def admin_health():
