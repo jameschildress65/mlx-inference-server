@@ -84,7 +84,7 @@ class TestMainAPIEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["healthy"] == True
-        assert data["version"] == "3.1.0"
+        assert data["version"] == "3.2.0"
 
     def test_completions_loads_model_on_demand(self, mock_config, mock_worker_manager):
         """Test /v1/completions loads model if not loaded."""
@@ -308,7 +308,7 @@ class TestAdminAPIEndpoints:
         data = response.json()
         assert data["status"] == "healthy"
         assert data["worker_status"] == "healthy"
-        assert data["version"] == "3.1.0"
+        assert data["version"] == "3.2.0"
 
     def test_admin_status_endpoint(self, mock_config, mock_worker_manager):
         """Test GET /admin/status endpoint."""
@@ -331,7 +331,7 @@ class TestAdminAPIEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "running"
-        assert data["version"] == "3.1.0"
+        assert data["version"] == "3.2.0"
         assert data["ports"]["main"] == 11440
         assert data["ports"]["admin"] == 11441
         assert data["model"]["loaded"] is True

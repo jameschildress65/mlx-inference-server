@@ -9,51 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- **Request parameter logging** - Enhanced debugging and monitoring
-  - Log max_tokens, temperature, top_p, repetition_penalty for all requests
-  - Helps diagnose timeout issues and client behavior
-  - Files changed: `src/orchestrator/api.py`
+*No unreleased changes.*
 
-- **HF_HOME fallback in daemon script** - Robust model cache configuration
-  - Daemon script now sets HF_HOME with fallback to `~/.cache/huggingface`
-  - Works across manual starts, launchd, cron scenarios
-  - Each machine can override via shell config
-  - Files changed: `bin/mlx-inference-server-daemon.sh`
+---
+
+## [3.2.0] - 2026-01-30
+
+### Added
+- **JSON Mode (Structured Output)** - OpenAI-compatible response_format field
+  - `response_format: {type: "json_object"}` for generic JSON output
+  - `response_format: {type: "json_schema", json_schema: {...}}` for schema-constrained output
+  - Uses Outlines library for constrained decoding via logits processing
+  - Bounded LRU cache (10 entries) for JSON processors
+  - Schema validation: 64KB size limit, 20 levels max depth
+  - Files changed: `src/orchestrator/api.py`, `src/ipc/messages.py`, `src/worker/inference.py`
+  - Tests: `tests/unit/test_json_mode.py` (27 tests)
+
+- **Priority Request Queue** - Fair scheduling with priority levels
+  - Three priority levels: HIGH, NORMAL, LOW (set via X-Priority header)
+  - Configurable timeouts per priority (default: 300s/120s/60s)
+  - Queue depth limits with reject threshold
+  - Prometheus metrics integration
+  - Files changed: `src/orchestrator/priority_queue.py`, `src/orchestrator/api.py`
+  - Tests: `tests/unit/test_priority_queue.py`, `tests/integration/test_queue_integration.py`
+
+- **Rate Limiting** - Sliding window rate limiter (optional)
+  - Global request rate limiting (disabled by default)
+  - Configurable RPM and burst size
+  - Enable with `MLX_RATE_LIMIT_ENABLED=1`
+  - Files changed: `src/orchestrator/rate_limiter.py`
+
+- **Prometheus Metrics** - Production monitoring endpoint
+  - `/metrics` endpoint with request counts, latencies, queue stats
+  - Model loading metrics, GPU memory tracking
+  - Files changed: `src/orchestrator/prometheus_metrics.py`
 
 ### Changed
-- **Version updated to 3.1.0** - Proper semantic versioning
-  - Updated from development version to production release
-  - Files changed: `src/orchestrator/api.py`
-  - Tests updated: `tests/unit/test_api_v3.py`
+- **Version updated to 3.2.0**
 
 ### Fixed
-- **Vision API image threshold bug** - Images ≥500KB now work properly
-  - Increased INLINE_THRESHOLD from 500KB to 10MB
-  - Added public `bridge` property to WorkerManager for image processing
-  - Vision API now handles all images up to maximum 10MB size limit
-  - Files changed: `src/orchestrator/image_utils.py`, `src/orchestrator/worker_manager.py`
-  - Commit: bf47a28
-
-- **Chat template warning for vision models** - Eliminated type mismatch warning
-  - Fixed multimodal content handling in chat completions endpoint
-  - Now properly extracts text from content blocks before applying chat template
-  - No more "can only concatenate str (not 'list') to str" warnings
-  - Files changed: `src/orchestrator/api.py`
-
-### Technical Details
-**Image Threshold Fix:**
-- Previous behavior: Images ≥500KB tried to use shared memory but bridge was inaccessible
-- Error message: "Large image requires shared memory bridge, but none provided"
-- Root cause: No public property to access internal `_shmem_bridge` in WorkerManager
-- Solution: Increased threshold to 10MB (matches max image size), added bridge property
-- Impact: Simpler architecture - all typical images use inline base64, no shared memory needed
-
-**Chat Template Fix:**
-- Previous behavior: Vision requests with multimodal content triggered type warning
-- Cause: Content list passed directly to tokenizer expecting string
-- Solution: Preprocess content to extract text before applying chat template
-- Impact: Clean logs, no functional change (fallback already worked)
+- **Vision backend TypeError** - VisionInferenceBackend now accepts JSON mode params
+  - Prevents TypeError on all vision model requests
+  - JSON mode params are accepted but ignored (not supported for vision)
 
 ---
 

@@ -12,8 +12,10 @@ Built to address limitations in existing MLX servers: lack of process isolation,
 
 ### Core Capabilities
 - **Process Isolation**: Worker processes separated from orchestrator for crash resilience
-- **robust ProcessRegistry**: Crash-safe worker lifecycle management with automatic orphan cleanup
+- **Robust ProcessRegistry**: Crash-safe worker lifecycle management with automatic orphan cleanup
 - **Vision/Multimodal**: Support for vision-language models with dual-venv architecture
+- **JSON Mode**: Structured output with schema validation (OpenAI-compatible `response_format`)
+- **Priority Queue**: Fair request scheduling with HIGH/NORMAL/LOW priorities
 - **POSIX Semaphores**: Cross-process synchronization with proper memory ordering
 - **Atomic Operations**: Crash-safe file operations using temp-file + rename pattern
 - **Async-Signal-Safe**: Proper signal handling without deadlock risks
@@ -24,6 +26,8 @@ Built to address limitations in existing MLX servers: lack of process isolation,
 - **On-Demand Loading**: Models load automatically on first request
 - **Idle Timeout**: Automatic unload to free memory
 - **Admin API**: Status monitoring, manual controls, health checks
+- **Prometheus Metrics**: Production monitoring via `/metrics` endpoint
+- **Rate Limiting**: Optional request rate limiting (disabled by default)
 
 ## Quick Start
 
@@ -105,6 +109,56 @@ curl -X POST http://localhost:11440/v1/chat/completions \\
 curl http://localhost:11441/admin/status
 ```
 
+### JSON Mode (Structured Output)
+
+Force the model to output valid JSON:
+
+```bash
+# Generic JSON object
+curl -X POST http://localhost:11440/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+    "messages": [{"role": "user", "content": "List 3 colors as JSON"}],
+    "response_format": {"type": "json_object"}
+  }'
+
+# Schema-constrained JSON
+curl -X POST http://localhost:11440/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+    "messages": [{"role": "user", "content": "Generate a person"}],
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "age": {"type": "integer"}
+        },
+        "required": ["name", "age"]
+      }
+    }
+  }'
+```
+
+**Requirements:** `pip install 'outlines[mlxlm]'`
+
+### Priority Requests
+
+Set request priority with the `X-Priority` header:
+
+```bash
+# High priority request (processed first)
+curl -X POST http://localhost:11440/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-Priority: high" \
+  -d '{"model": "...", "messages": [...]}'
+```
+
+Priority levels: `high`, `normal` (default), `low`
+
 ## Configuration
 
 Server auto-detects hardware and configures itself based on available RAM:
@@ -119,9 +173,21 @@ Server auto-detects hardware and configures itself based on available RAM:
 ```bash
 export MLX_IDLE_TIMEOUT=600              # Idle timeout (seconds)
 export MLX_REQUEST_TIMEOUT=300           # Request timeout (seconds)
-export MLX_MAX_CONCURRENT_REQUESTS=10    # Max concurrent requests (Phase 2.1)
+export MLX_MAX_CONCURRENT_REQUESTS=10    # Max concurrent requests
 export MLX_ADMIN_PORT=11441              # Admin API port
 export HF_HOME=~/.cache/huggingface      # Model cache directory
+
+# Priority Queue (v3.2.0+)
+export MLX_QUEUE_ENABLED=1               # Enable priority queue
+export MLX_QUEUE_MAX_DEPTH=50            # Max queued requests
+export MLX_QUEUE_TIMEOUT_HIGH=300        # High priority timeout (seconds)
+export MLX_QUEUE_TIMEOUT_NORMAL=120      # Normal priority timeout
+export MLX_QUEUE_TIMEOUT_LOW=60          # Low priority timeout
+
+# Rate Limiting (optional, disabled by default)
+export MLX_RATE_LIMIT_ENABLED=1          # Enable rate limiting
+export MLX_RATE_LIMIT_RPM=60             # Requests per minute
+export MLX_RATE_LIMIT_BURST=10           # Burst allowance
 ```
 
 ## Architecture
@@ -181,8 +247,13 @@ See [docs/API-REFERENCE.md](docs/API-REFERENCE.md) for complete API documentatio
 
 **Key endpoints:**
 - `POST /v1/chat/completions` - Chat completion (OpenAI compatible)
+- `POST /v1/completions` - Text completion
 - `GET /v1/models` - List available models
+- `GET /health` - Health check (for load balancers)
+- `GET /ready` - Readiness probe (Kubernetes-style)
 - `GET /admin/status` - Server status
+- `GET /admin/metrics` - Request metrics and queue stats
+- `GET /metrics` - Prometheus metrics endpoint
 - `POST /admin/unload` - Manual model unload
 
 ## Documentation

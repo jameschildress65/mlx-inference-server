@@ -430,7 +430,7 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
     app = FastAPI(
         title="MLX Server V3",
         description="Production-grade LLM inference server with process isolation",
-        version="3.1.0"
+        version="3.2.0"
     )
 
     # OpenAI-compatible error formatting
@@ -518,7 +518,7 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                 "worker": worker
             },
             "timestamp": datetime.utcnow().isoformat(),
-            "version": "3.1.0"
+            "version": "3.2.0"
         }
 
         status_code = 200 if healthy else 503
@@ -1055,14 +1055,14 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
     app = FastAPI(
         title="MLX Server V3 - Admin API",
         description="Administrative endpoints for model management",
-        version="3.1.0"
+        version="3.2.0"
     )
 
     # 6.3: Include Prometheus metrics router
     app.include_router(metrics_router)
 
     # Initialize server info metric
-    metrics_collector.set_server_info(version="3.1.0")
+    metrics_collector.set_server_info(version="3.2.0")
 
     @app.get("/admin/health")
     async def admin_health():
@@ -1071,7 +1071,7 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
         return {
             "status": "healthy" if health["healthy"] else "degraded",
             "worker_status": health["status"],
-            "version": "3.1.0"
+            "version": "3.2.0"
         }
 
     @app.get("/admin/status")
@@ -1082,7 +1082,7 @@ def create_admin_app(config: ServerConfig, worker_manager: WorkerManager) -> Fas
 
         return {
             "status": "running",
-            "version": "3.1.0",
+            "version": "3.2.0",
             "ports": {
                 "main": config.main_port,
                 "admin": config.admin_port
