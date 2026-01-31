@@ -8,8 +8,12 @@
 # - Rate Limiting
 # - Prometheus Metrics
 #
-# Usage: ./bin/test-v3.2-features.sh [host] [port]
-#        Default: localhost 11440
+# Usage: ./bin/test-v3.2-features.sh [host] [port] [admin_port] [model]
+#        Default: localhost 11440 11441 mlx-community/Qwen2.5-3B-Instruct-4bit
+#
+# Examples:
+#   ./bin/test-v3.2-features.sh
+#   ./bin/test-v3.2-features.sh localhost 11440 11441 ${MODEL}
 #
 # Exit codes:
 #   0 = All tests passed
@@ -20,6 +24,7 @@ set -e
 HOST="${1:-localhost}"
 PORT="${2:-11440}"
 ADMIN_PORT="${3:-11441}"
+MODEL="${4:-mlx-community/Qwen2.5-3B-Instruct-4bit}"
 BASE_URL="http://${HOST}:${PORT}"
 ADMIN_URL="http://${HOST}:${ADMIN_PORT}"
 
@@ -145,7 +150,7 @@ test_json_mode() {
     local response=$(curl -s -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d '{
-            "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "model": "${MODEL}",
             "messages": [{"role": "user", "content": "Return a JSON object with keys: name (string), count (number). Just the JSON, nothing else."}],
             "max_tokens": 100,
             "temperature": 0.1,
@@ -164,7 +169,7 @@ test_json_mode() {
     local response=$(curl -s -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d '{
-            "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "model": "${MODEL}",
             "messages": [{"role": "user", "content": "Generate a person with name and age."}],
             "max_tokens": 100,
             "temperature": 0.1,
@@ -202,7 +207,7 @@ test_json_mode() {
     local response=$(curl -s -w "%{http_code}" -o /tmp/schema_error.json -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d "{
-            \"model\": \"mlx-community/Qwen2.5-7B-Instruct-4bit\",
+            \"model\": \"${MODEL}\",
             \"messages\": [{\"role\": \"user\", \"content\": \"test\"}],
             \"response_format\": {\"type\": \"json_schema\", \"json_schema\": $big_schema}
         }" 2>/dev/null)
@@ -240,7 +245,7 @@ test_priority_queue() {
         -H "Content-Type: application/json" \
         -H "X-Priority: high" \
         -d '{
-            "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "model": "${MODEL}",
             "messages": [{"role": "user", "content": "Say hi"}],
             "max_tokens": 10
         }' 2>/dev/null)
@@ -257,7 +262,7 @@ test_priority_queue() {
         -H "Content-Type: application/json" \
         -H "X-Priority: low" \
         -d '{
-            "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "model": "${MODEL}",
             "messages": [{"role": "user", "content": "Say bye"}],
             "max_tokens": 10
         }' 2>/dev/null)
@@ -274,7 +279,7 @@ test_priority_queue() {
         -H "Content-Type: application/json" \
         -H "X-Priority: INVALID" \
         -d '{
-            "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "model": "${MODEL}",
             "messages": [{"role": "user", "content": "Test"}],
             "max_tokens": 10
         }' 2>/dev/null)
@@ -373,7 +378,7 @@ test_streaming() {
     local response=$(curl -s -N -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d '{
-            "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "model": "${MODEL}",
             "messages": [{"role": "user", "content": "Count from 1 to 5"}],
             "max_tokens": 50,
             "stream": true
@@ -392,7 +397,7 @@ test_streaming() {
         -H "Content-Type: application/json" \
         -H "X-Priority: high" \
         -d '{
-            "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "model": "${MODEL}",
             "messages": [{"role": "user", "content": "Say hello"}],
             "max_tokens": 20,
             "stream": true
@@ -420,20 +425,20 @@ test_concurrent() {
     curl -s -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "X-Priority: low" \
-        -d '{"model": "mlx-community/Qwen2.5-7B-Instruct-4bit", "messages": [{"role": "user", "content": "Say low"}], "max_tokens": 10}' \
+        -d '{"model": "${MODEL}", "messages": [{"role": "user", "content": "Say low"}], "max_tokens": 10}' \
         > /tmp/concurrent_low.json 2>&1 &
     local pid_low=$!
 
     curl -s -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "X-Priority: high" \
-        -d '{"model": "mlx-community/Qwen2.5-7B-Instruct-4bit", "messages": [{"role": "user", "content": "Say high"}], "max_tokens": 10}' \
+        -d '{"model": "${MODEL}", "messages": [{"role": "user", "content": "Say high"}], "max_tokens": 10}' \
         > /tmp/concurrent_high.json 2>&1 &
     local pid_high=$!
 
     curl -s -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
-        -d '{"model": "mlx-community/Qwen2.5-7B-Instruct-4bit", "messages": [{"role": "user", "content": "Say normal"}], "max_tokens": 10}' \
+        -d '{"model": "${MODEL}", "messages": [{"role": "user", "content": "Say normal"}], "max_tokens": 10}' \
         > /tmp/concurrent_normal.json 2>&1 &
     local pid_normal=$!
 
@@ -465,6 +470,7 @@ main() {
     echo "=============================================="
     echo "Target: ${BASE_URL}"
     echo "Admin:  ${ADMIN_URL}"
+    echo "Model:  ${MODEL}"
     echo ""
 
     check_server
