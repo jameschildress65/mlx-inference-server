@@ -74,6 +74,9 @@ class CompletionRequest(BaseModel):
     repetition_penalty: float = 1.1
     stream: bool = False
     images: Optional[list[ImageData]] = None  # Vision/multimodal support
+    # JSON Mode support
+    response_format_type: Optional[str] = None  # "text", "json_object", "json_schema"
+    json_schema: Optional[dict] = None  # JSON schema when type="json_schema"
 
 
 class PingMessage(BaseModel):
