@@ -46,17 +46,17 @@ log_test() {
 
 log_pass() {
     echo -e "${GREEN}[PASS]${NC} $1"
-    ((PASSED++))
+    ((PASSED++)) || true
 }
 
 log_fail() {
     echo -e "${RED}[FAIL]${NC} $1"
-    ((FAILED++))
+    ((FAILED++)) || true
 }
 
 log_skip() {
     echo -e "${YELLOW}[SKIP]${NC} $1"
-    ((SKIPPED++))
+    ((SKIPPED++)) || true
 }
 
 log_info() {
@@ -149,13 +149,13 @@ test_json_mode() {
     log_test "Testing json_object mode..."
     local response=$(curl -s -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
-        -d '{
-            "model": "${MODEL}",
-            "messages": [{"role": "user", "content": "Return a JSON object with keys: name (string), count (number). Just the JSON, nothing else."}],
-            "max_tokens": 100,
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"}
-        }' 2>/dev/null)
+        -d "{
+            \"model\": \"${MODEL}\",
+            \"messages\": [{\"role\": \"user\", \"content\": \"Return a JSON object with keys: name (string), count (number). Just the JSON, nothing else.\"}],
+            \"max_tokens\": 100,
+            \"temperature\": 0.1,
+            \"response_format\": {\"type\": \"json_object\"}
+        }" 2>/dev/null)
 
     if echo "$response" | python3 -c "import sys,json; data=json.load(sys.stdin); content=data['choices'][0]['message']['content']; json.loads(content); print('valid')" 2>/dev/null | grep -q "valid"; then
         log_pass "json_object mode returns valid JSON"
@@ -168,23 +168,23 @@ test_json_mode() {
     log_test "Testing json_schema mode with schema..."
     local response=$(curl -s -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
-        -d '{
-            "model": "${MODEL}",
-            "messages": [{"role": "user", "content": "Generate a person with name and age."}],
-            "max_tokens": 100,
-            "temperature": 0.1,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "age": {"type": "integer"}
+        -d "{
+            \"model\": \"${MODEL}\",
+            \"messages\": [{\"role\": \"user\", \"content\": \"Generate a person with name and age.\"}],
+            \"max_tokens\": 100,
+            \"temperature\": 0.1,
+            \"response_format\": {
+                \"type\": \"json_schema\",
+                \"json_schema\": {
+                    \"type\": \"object\",
+                    \"properties\": {
+                        \"name\": {\"type\": \"string\"},
+                        \"age\": {\"type\": \"integer\"}
                     },
-                    "required": ["name", "age"]
+                    \"required\": [\"name\", \"age\"]
                 }
             }
-        }' 2>/dev/null)
+        }" 2>/dev/null)
 
     local content=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['message']['content'])" 2>/dev/null)
     if echo "$content" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'name' in d and 'age' in d; print('valid')" 2>/dev/null | grep -q "valid"; then
@@ -244,11 +244,11 @@ test_priority_queue() {
     local response=$(curl -s -w "%{http_code}" -o /tmp/priority_response.json -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "X-Priority: high" \
-        -d '{
-            "model": "${MODEL}",
-            "messages": [{"role": "user", "content": "Say hi"}],
-            "max_tokens": 10
-        }' 2>/dev/null)
+        -d "{
+            \"model\": \"${MODEL}\",
+            \"messages\": [{\"role\": \"user\", \"content\": \"Say hi\"}],
+            \"max_tokens\": 10
+        }" 2>/dev/null)
 
     if [ "$response" = "200" ]; then
         log_pass "X-Priority: high accepted"
@@ -261,11 +261,11 @@ test_priority_queue() {
     local response=$(curl -s -w "%{http_code}" -o /dev/null -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "X-Priority: low" \
-        -d '{
-            "model": "${MODEL}",
-            "messages": [{"role": "user", "content": "Say bye"}],
-            "max_tokens": 10
-        }' 2>/dev/null)
+        -d "{
+            \"model\": \"${MODEL}\",
+            \"messages\": [{\"role\": \"user\", \"content\": \"Say bye\"}],
+            \"max_tokens\": 10
+        }" 2>/dev/null)
 
     if [ "$response" = "200" ]; then
         log_pass "X-Priority: low accepted"
@@ -278,11 +278,11 @@ test_priority_queue() {
     local response=$(curl -s -w "%{http_code}" -o /dev/null -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "X-Priority: INVALID" \
-        -d '{
-            "model": "${MODEL}",
-            "messages": [{"role": "user", "content": "Test"}],
-            "max_tokens": 10
-        }' 2>/dev/null)
+        -d "{
+            \"model\": \"${MODEL}\",
+            \"messages\": [{\"role\": \"user\", \"content\": \"Test\"}],
+            \"max_tokens\": 10
+        }" 2>/dev/null)
 
     if [ "$response" = "200" ]; then
         log_pass "Invalid priority handled gracefully"
@@ -377,12 +377,12 @@ test_streaming() {
     log_test "Testing streaming chat completion..."
     local response=$(curl -s -N -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
-        -d '{
-            "model": "${MODEL}",
-            "messages": [{"role": "user", "content": "Count from 1 to 5"}],
-            "max_tokens": 50,
-            "stream": true
-        }' 2>/dev/null | head -20)
+        -d "{
+            \"model\": \"${MODEL}\",
+            \"messages\": [{\"role\": \"user\", \"content\": \"Count from 1 to 5\"}],
+            \"max_tokens\": 50,
+            \"stream\": true
+        }" 2>/dev/null | head -20)
 
     if echo "$response" | grep -q "data:"; then
         log_pass "Streaming returns SSE data chunks"
@@ -396,12 +396,12 @@ test_streaming() {
     local response=$(curl -s -N -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "X-Priority: high" \
-        -d '{
-            "model": "${MODEL}",
-            "messages": [{"role": "user", "content": "Say hello"}],
-            "max_tokens": 20,
-            "stream": true
-        }' 2>/dev/null | head -10)
+        -d "{
+            \"model\": \"${MODEL}\",
+            \"messages\": [{\"role\": \"user\", \"content\": \"Say hello\"}],
+            \"max_tokens\": 20,
+            \"stream\": true
+        }" 2>/dev/null | head -10)
 
     if echo "$response" | grep -q "data:"; then
         log_pass "Streaming with priority works"
@@ -425,20 +425,20 @@ test_concurrent() {
     curl -s -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "X-Priority: low" \
-        -d '{"model": "${MODEL}", "messages": [{"role": "user", "content": "Say low"}], "max_tokens": 10}' \
+        -d "{\"model\": \"${MODEL}\", \"messages\": [{\"role\": \"user\", \"content\": \"Say low\"}], \"max_tokens\": 10}" \
         > /tmp/concurrent_low.json 2>&1 &
     local pid_low=$!
 
     curl -s -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "X-Priority: high" \
-        -d '{"model": "${MODEL}", "messages": [{"role": "user", "content": "Say high"}], "max_tokens": 10}' \
+        -d "{\"model\": \"${MODEL}\", \"messages\": [{\"role\": \"user\", \"content\": \"Say high\"}], \"max_tokens\": 10}" \
         > /tmp/concurrent_high.json 2>&1 &
     local pid_high=$!
 
     curl -s -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
-        -d '{"model": "${MODEL}", "messages": [{"role": "user", "content": "Say normal"}], "max_tokens": 10}' \
+        -d "{\"model\": \"${MODEL}\", \"messages\": [{\"role\": \"user\", \"content\": \"Say normal\"}], \"max_tokens\": 10}" \
         > /tmp/concurrent_normal.json 2>&1 &
     local pid_normal=$!
 
@@ -449,7 +449,7 @@ test_concurrent() {
     local success=0
     for f in /tmp/concurrent_low.json /tmp/concurrent_high.json /tmp/concurrent_normal.json; do
         if cat "$f" | python3 -c "import sys,json; json.load(sys.stdin)['choices'][0]" 2>/dev/null; then
-            ((success++))
+            ((success++)) || true
         fi
     done
 
