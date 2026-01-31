@@ -238,6 +238,76 @@ def clear_tokenizer_cache():
 
 # Request/Response Models (OpenAI-compatible)
 
+# H3: Schema size limits to prevent DoS (module-level constants)
+RESPONSE_FORMAT_MAX_SCHEMA_SIZE_BYTES = 64 * 1024  # 64KB max schema size
+RESPONSE_FORMAT_MAX_SCHEMA_DEPTH = 20  # Maximum nesting depth
+
+
+def _check_schema_depth(obj: Any, current_depth: int = 0) -> int:
+    """Check maximum nesting depth of schema object."""
+    if current_depth > RESPONSE_FORMAT_MAX_SCHEMA_DEPTH:
+        return current_depth
+    if isinstance(obj, dict):
+        if not obj:
+            return current_depth
+        return max(_check_schema_depth(v, current_depth + 1) for v in obj.values())
+    if isinstance(obj, list):
+        if not obj:
+            return current_depth
+        return max(_check_schema_depth(v, current_depth + 1) for v in obj)
+    return current_depth
+
+
+class ResponseFormat(BaseModel):
+    """OpenAI-compatible response_format field for structured output.
+
+    Supports:
+    - type="text": Default, unstructured text output
+    - type="json_object": Constrain output to valid JSON object
+    - type="json_schema": Constrain output to match provided JSON schema
+
+    Requires outlines package for json_object/json_schema modes.
+
+    Security (Opus H2/H3):
+    - Validates json_schema is provided when type="json_schema"
+    - Limits schema size to prevent DoS via complex regex compilation
+    """
+    type: Literal["text", "json_object", "json_schema"] = "text"
+    json_schema: Optional[Dict[str, Any]] = None  # Required when type="json_schema"
+
+    def model_post_init(self, __context: Any) -> None:
+        """Validate response_format after model initialization.
+
+        Opus H2: Validate json_schema is provided when type="json_schema"
+        Opus H3: Validate schema size/complexity limits
+        """
+        # H2: Require schema when type is json_schema
+        if self.type == "json_schema" and self.json_schema is None:
+            raise ValueError(
+                "json_schema is required when type='json_schema'. "
+                "Provide a JSON schema or use type='json_object' for generic JSON."
+            )
+
+        # H3: Validate schema size limits
+        if self.json_schema is not None:
+            schema_str = json.dumps(self.json_schema)
+
+            # Check size
+            if len(schema_str) > RESPONSE_FORMAT_MAX_SCHEMA_SIZE_BYTES:
+                raise ValueError(
+                    f"JSON schema too large: {len(schema_str)} bytes exceeds "
+                    f"{RESPONSE_FORMAT_MAX_SCHEMA_SIZE_BYTES} byte limit"
+                )
+
+            # Check depth
+            depth = _check_schema_depth(self.json_schema)
+            if depth > RESPONSE_FORMAT_MAX_SCHEMA_DEPTH:
+                raise ValueError(
+                    f"JSON schema too deeply nested: depth {depth} exceeds "
+                    f"{RESPONSE_FORMAT_MAX_SCHEMA_DEPTH} level limit"
+                )
+
+
 class CompletionRequest(BaseModel):
     """OpenAI-compatible completion request.
 
@@ -251,6 +321,7 @@ class CompletionRequest(BaseModel):
     top_p: float = Field(default=1.0, ge=0.0, le=1.0)  # S4: Valid probability
     repetition_penalty: float = Field(default=1.1, ge=0.0, le=10.0)  # S4: Sane range
     stream: bool = False
+    response_format: Optional[ResponseFormat] = None  # JSON mode support
 
 
 class CompletionResponse(BaseModel):
@@ -305,6 +376,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: float = Field(default=1.0, ge=0.0, le=1.0)  # S4: Valid probability
     repetition_penalty: float = Field(default=1.1, ge=0.0, le=10.0)  # S4: Sane range
     stream: bool = False
+    response_format: Optional[ResponseFormat] = None  # JSON mode support
 
 
 # API Application
@@ -573,6 +645,14 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
             ensure_model_loaded(worker_manager, request.model)
 
             # Create IPC request
+            # Extract JSON mode settings
+            response_format_type = None
+            json_schema = None
+            if request.response_format:
+                response_format_type = request.response_format.type
+                if response_format_type == "json_schema":
+                    json_schema = request.response_format.json_schema
+
             ipc_request = IPCCompletionRequest(
                 model=request.model,
                 prompt=request.prompt,
@@ -580,7 +660,9 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                 temperature=request.temperature,
                 top_p=request.top_p,
                 repetition_penalty=request.repetition_penalty,
-                stream=request.stream
+                stream=request.stream,
+                response_format_type=response_format_type,
+                json_schema=json_schema
             )
 
             # Generate
@@ -820,6 +902,14 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                     raise HTTPException(status_code=400, detail=f"Image processing error: {e}")
 
             # Create IPC request
+            # Extract JSON mode settings
+            response_format_type = None
+            json_schema = None
+            if request.response_format:
+                response_format_type = request.response_format.type
+                if response_format_type == "json_schema":
+                    json_schema = request.response_format.json_schema
+
             ipc_request = IPCCompletionRequest(
                 model=request.model,
                 prompt=prompt,
@@ -828,7 +918,9 @@ def create_app(config: ServerConfig, worker_manager: WorkerManager) -> FastAPI:
                 top_p=request.top_p,
                 repetition_penalty=request.repetition_penalty,
                 stream=request.stream,
-                images=images  # Pass preprocessed images (None for text-only)
+                images=images,  # Pass preprocessed images (None for text-only)
+                response_format_type=response_format_type,
+                json_schema=json_schema
             )
 
             # Generate

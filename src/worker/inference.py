@@ -87,6 +87,7 @@ class TextInferenceBackend(InferenceBackend):
     Text-only inference backend using mlx_lm.
 
     Original implementation from Phase 1/2 with Opus 4.5 optimizations.
+    Supports JSON mode via Outlines integration.
     """
 
     def __init__(self, model: Any, tokenizer: Any):
@@ -104,6 +105,82 @@ class TextInferenceBackend(InferenceBackend):
         self._logits_processor_cache: Dict[float, Any] = {}
         # OPTIMIZATION: Token batching for streaming (Opus 4.5)
         self._token_batch_size = 4  # Optimal for M4
+        # JSON Mode: Cache for Outlines processors (H1: bounded cache)
+        self._json_processor_cache: Dict[str, Any] = {}
+        self._json_processor_cache_order: list = []  # LRU tracking
+        self._json_processor_cache_max = 10  # H1: Limit cache size
+        self._outlines_available: Optional[bool] = None  # Lazy check
+
+    def _check_outlines_available(self) -> bool:
+        """Check if Outlines is available for JSON mode (lazy, cached)."""
+        if self._outlines_available is None:
+            try:
+                from outlines.processors import JSONLogitsProcessor
+                self._outlines_available = True
+                logger.debug("Outlines available for JSON mode")
+            except ImportError:
+                self._outlines_available = False
+                logger.debug("Outlines not available - JSON mode disabled")
+        return self._outlines_available
+
+    def _get_json_logits_processor(self, json_schema: Optional[dict] = None):
+        """Get or create JSON logits processor for schema.
+
+        Args:
+            json_schema: JSON schema to constrain output, or None for generic JSON
+
+        Returns:
+            Outlines JSONLogitsProcessor wrapped for MLX compatibility
+
+        Raises:
+            ValueError: If Outlines is not installed
+
+        Security (Opus H1): Uses bounded LRU cache to prevent memory exhaustion
+        from many unique schemas.
+        """
+        import json
+        import hashlib
+
+        if not self._check_outlines_available():
+            raise ValueError(
+                "JSON mode requires outlines package. "
+                "Install with: pip install 'outlines[mlxlm]'"
+            )
+
+        # Use generic object schema if none provided
+        if json_schema is None:
+            json_schema = {"type": "object"}
+
+        # Cache key from schema hash
+        schema_str = json.dumps(json_schema, sort_keys=True)
+        cache_key = hashlib.md5(schema_str.encode()).hexdigest()
+
+        if cache_key in self._json_processor_cache:
+            # H1: Update LRU order on cache hit
+            if cache_key in self._json_processor_cache_order:
+                self._json_processor_cache_order.remove(cache_key)
+            self._json_processor_cache_order.append(cache_key)
+            return self._json_processor_cache[cache_key]
+
+        # H1: Evict oldest entries if cache is full
+        while len(self._json_processor_cache) >= self._json_processor_cache_max:
+            oldest_key = self._json_processor_cache_order.pop(0)
+            del self._json_processor_cache[oldest_key]
+            logger.debug(f"Evicted JSON processor from cache: {oldest_key[:8]}...")
+
+        from outlines.processors import JSONLogitsProcessor
+
+        logger.debug(f"Creating JSON logits processor for schema: {cache_key[:8]}...")
+
+        # Create processor - Outlines handles the schema->regex conversion
+        processor = JSONLogitsProcessor(
+            schema=json_schema,
+            tokenizer=self.tokenizer
+        )
+        self._json_processor_cache[cache_key] = processor
+        self._json_processor_cache_order.append(cache_key)
+
+        return processor
 
     def _get_cached_sampler(self, temperature: float, top_p: float):
         """Get cached sampler or create new one."""
@@ -138,7 +215,9 @@ class TextInferenceBackend(InferenceBackend):
         temperature: float = 0.7,
         top_p: float = 1.0,
         repetition_penalty: float = 1.1,
-        images: Optional[List] = None
+        images: Optional[List] = None,
+        response_format_type: Optional[str] = None,
+        json_schema: Optional[dict] = None
     ) -> Dict[str, Any]:
         """
         Generate text completion.
@@ -150,6 +229,8 @@ class TextInferenceBackend(InferenceBackend):
             top_p: Nucleus sampling parameter
             repetition_penalty: Penalty for repeating tokens
             images: Ignored for text-only backend
+            response_format_type: "text", "json_object", or "json_schema"
+            json_schema: JSON schema when response_format_type="json_schema"
 
         Returns:
             Dict with 'text', 'tokens', 'finish_reason'
@@ -160,11 +241,23 @@ class TextInferenceBackend(InferenceBackend):
         try:
             from mlx_lm import stream_generate
 
-            logger.debug(f"Generating completion (max_tokens={max_tokens}, temp={temperature})")
+            json_mode = response_format_type in ("json_object", "json_schema")
+            logger.debug(f"Generating completion (max_tokens={max_tokens}, temp={temperature}, json_mode={json_mode})")
 
             # Phase 1.2: Use cached samplers
             sampler = self._get_cached_sampler(temperature, top_p)
             logits_processors = self._get_cached_logits_processor(repetition_penalty)
+
+            # JSON Mode: Add JSON logits processor
+            if json_mode:
+                json_processor = self._get_json_logits_processor(
+                    json_schema if response_format_type == "json_schema" else None
+                )
+                # Combine processors - mlx_lm expects list or single processor
+                if logits_processors is not None:
+                    logits_processors = [logits_processors, json_processor]
+                else:
+                    logits_processors = json_processor
 
             # Use stream_generate internally for accurate token counting
             text_chunks = []
@@ -203,10 +296,22 @@ class TextInferenceBackend(InferenceBackend):
         temperature: float = 0.7,
         top_p: float = 1.0,
         repetition_penalty: float = 1.1,
-        images: Optional[List] = None
+        images: Optional[List] = None,
+        response_format_type: Optional[str] = None,
+        json_schema: Optional[dict] = None
     ) -> Iterator[Dict[str, Any]]:
         """
         Generate streaming text completion with async batching.
+
+        Args:
+            prompt: Input text
+            max_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+            top_p: Nucleus sampling parameter
+            repetition_penalty: Penalty for repeating tokens
+            images: Ignored for text-only backend
+            response_format_type: "text", "json_object", or "json_schema"
+            json_schema: JSON schema when response_format_type="json_schema"
 
         Yields:
             Dict chunks with 'text', 'token', 'done', 'finish_reason'
@@ -217,10 +322,21 @@ class TextInferenceBackend(InferenceBackend):
         try:
             from mlx_lm import stream_generate
 
-            logger.debug(f"Generating streaming completion (max_tokens={max_tokens})")
+            json_mode = response_format_type in ("json_object", "json_schema")
+            logger.debug(f"Generating streaming completion (max_tokens={max_tokens}, json_mode={json_mode})")
 
             sampler = self._get_cached_sampler(temperature, top_p)
             logits_processors = self._get_cached_logits_processor(repetition_penalty)
+
+            # JSON Mode: Add JSON logits processor
+            if json_mode:
+                json_processor = self._get_json_logits_processor(
+                    json_schema if response_format_type == "json_schema" else None
+                )
+                if logits_processors is not None:
+                    logits_processors = [logits_processors, json_processor]
+                else:
+                    logits_processors = json_processor
 
             # OPTIMIZATION: Accumulate tokens for batching
             batch_buffer = []
@@ -406,7 +522,9 @@ class VisionInferenceBackend(InferenceBackend):
         temperature: float = 0.7,
         top_p: float = 1.0,
         repetition_penalty: float = 1.1,
-        images: Optional[List] = None
+        images: Optional[List] = None,
+        response_format_type: Optional[str] = None,
+        json_schema: Optional[dict] = None
     ) -> Dict[str, Any]:
         """
         Generate vision completion with comprehensive error handling.
@@ -418,6 +536,8 @@ class VisionInferenceBackend(InferenceBackend):
             top_p: Nucleus sampling parameter
             repetition_penalty: Penalty for repeating tokens
             images: List of ImageData objects
+            response_format_type: Ignored (JSON mode not supported for vision)
+            json_schema: Ignored (JSON mode not supported for vision)
 
         Returns:
             Dict with 'text', 'tokens', 'finish_reason'
@@ -427,6 +547,10 @@ class VisionInferenceBackend(InferenceBackend):
             MemoryError: Insufficient memory for model or images
             Exception: Other inference failures
         """
+        # JSON mode not supported for vision - guard is in InferenceEngine
+        if response_format_type is not None:
+            logger.debug(f"Ignoring response_format_type={response_format_type} for vision model")
+
         try:
             from mlx_vlm import generate as vlm_generate
             from mlx_vlm.prompt_utils import apply_chat_template
@@ -533,7 +657,9 @@ class VisionInferenceBackend(InferenceBackend):
         temperature: float = 0.7,
         top_p: float = 1.0,
         repetition_penalty: float = 1.1,
-        images: Optional[List] = None
+        images: Optional[List] = None,
+        response_format_type: Optional[str] = None,
+        json_schema: Optional[dict] = None
     ) -> Iterator[Dict[str, Any]]:
         """
         Generate streaming vision completion.
@@ -541,13 +667,26 @@ class VisionInferenceBackend(InferenceBackend):
         Note: mlx-vlm doesn't support streaming yet, so we generate full response
         and yield it as a single chunk.
 
+        Args:
+            prompt: Input text
+            max_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+            top_p: Nucleus sampling parameter
+            repetition_penalty: Penalty for repeating tokens
+            images: List of ImageData objects
+            response_format_type: Ignored (JSON mode not supported for vision)
+            json_schema: Ignored (JSON mode not supported for vision)
+
         Yields:
             Dict chunks with 'text', 'token', 'done', 'finish_reason'
         """
         logger.debug("Vision streaming (non-streamed): generating full response")
 
-        # Generate full response
-        result = self.generate(prompt, max_tokens, temperature, top_p, repetition_penalty, images)
+        # Generate full response (passes JSON mode params to generate, which logs and ignores)
+        result = self.generate(
+            prompt, max_tokens, temperature, top_p, repetition_penalty, images,
+            response_format_type=response_format_type, json_schema=json_schema
+        )
 
         # Yield as single chunk
         yield {
@@ -592,7 +731,9 @@ class InferenceEngine:
         temperature: float = 0.7,
         top_p: float = 1.0,
         repetition_penalty: float = 1.1,
-        images: Optional[List] = None
+        images: Optional[List] = None,
+        response_format_type: Optional[str] = None,
+        json_schema: Optional[dict] = None
     ) -> Dict[str, Any]:
         """
         Generate completion using appropriate backend.
@@ -604,12 +745,19 @@ class InferenceEngine:
             top_p: Nucleus sampling parameter
             repetition_penalty: Penalty for repeating tokens
             images: Optional list of ImageData (for vision models)
+            response_format_type: "text", "json_object", or "json_schema"
+            json_schema: JSON schema when response_format_type="json_schema"
 
         Returns:
             Dict with 'text', 'tokens', 'finish_reason'
         """
+        # JSON mode only supported for text models
+        if response_format_type in ("json_object", "json_schema") and self.model_type == "vision":
+            raise ValueError("JSON mode is not supported for vision models")
+
         return self.backend.generate(
-            prompt, max_tokens, temperature, top_p, repetition_penalty, images
+            prompt, max_tokens, temperature, top_p, repetition_penalty, images,
+            response_format_type=response_format_type, json_schema=json_schema
         )
 
     def generate_stream(
@@ -619,14 +767,31 @@ class InferenceEngine:
         temperature: float = 0.7,
         top_p: float = 1.0,
         repetition_penalty: float = 1.1,
-        images: Optional[List] = None
+        images: Optional[List] = None,
+        response_format_type: Optional[str] = None,
+        json_schema: Optional[dict] = None
     ) -> Iterator[Dict[str, Any]]:
         """
         Generate streaming completion using appropriate backend.
 
+        Args:
+            prompt: Input text
+            max_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+            top_p: Nucleus sampling parameter
+            repetition_penalty: Penalty for repeating tokens
+            images: Optional list of ImageData (for vision models)
+            response_format_type: "text", "json_object", or "json_schema"
+            json_schema: JSON schema when response_format_type="json_schema"
+
         Yields:
             Dict chunks with 'text', 'token', 'done', 'finish_reason'
         """
+        # JSON mode only supported for text models
+        if response_format_type in ("json_object", "json_schema") and self.model_type == "vision":
+            raise ValueError("JSON mode is not supported for vision models")
+
         yield from self.backend.generate_stream(
-            prompt, max_tokens, temperature, top_p, repetition_penalty, images
+            prompt, max_tokens, temperature, top_p, repetition_penalty, images,
+            response_format_type=response_format_type, json_schema=json_schema
         )

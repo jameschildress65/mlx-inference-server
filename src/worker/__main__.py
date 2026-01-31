@@ -283,7 +283,9 @@ class WorkerProcess:
                                     temperature=request.temperature,
                                     top_p=request.top_p,
                                     repetition_penalty=request.repetition_penalty,
-                                    images=resolved_images  # C3: Use resolved images
+                                    images=resolved_images,  # C3: Use resolved images
+                                    response_format_type=request.response_format_type,  # JSON mode
+                                    json_schema=request.json_schema  # JSON mode
                                 ):
                                     # Send each chunk
                                     self.handler.send_stream_chunk(
@@ -300,7 +302,9 @@ class WorkerProcess:
                                     temperature=request.temperature,
                                     top_p=request.top_p,
                                     repetition_penalty=request.repetition_penalty,
-                                    images=resolved_images  # C3: Use resolved images
+                                    images=resolved_images,  # C3: Use resolved images
+                                    response_format_type=request.response_format_type,  # JSON mode
+                                    json_schema=request.json_schema  # JSON mode
                                 )
 
                                 self.handler.send_completion(
